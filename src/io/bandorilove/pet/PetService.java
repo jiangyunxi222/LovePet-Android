@@ -144,6 +144,7 @@ public final class PetService extends Service {
         private int windowY;
         private boolean dragging;
         private boolean pinching;
+        private boolean captionGesture;
         private int firstFinger;
         private int secondFinger;
         private float initialSpan;
@@ -203,11 +204,16 @@ public final class PetService extends Service {
         @Override public boolean dispatchTouchEvent(MotionEvent event) {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
+                captionGesture = player.hitsCaption(event.getX(), event.getY());
                 dragging = pinching = false;
                 startX = event.getRawX();
                 startY = event.getRawY();
                 windowX = frame.x;
                 windowY = frame.y;
+            }
+            if (captionGesture) {
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) captionGesture = false;
+                return super.dispatchTouchEvent(event);
             }
             if (action == MotionEvent.ACTION_POINTER_DOWN && !pinching) {
                 if (!dragging) cancelChild(event);

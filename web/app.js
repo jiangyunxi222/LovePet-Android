@@ -5,6 +5,16 @@ const native = window.AndroidPet;
 const pet = new URLSearchParams(location.search).get("pet") === "1";
 const names = { action: "动作", expression: "表情", costume: "衣装", voice: "语音" };
 const view = { session: null, costume: null, model: null, app: null, generation: 0, tab: "action" };
+const caption = $("#caption");
+const captionStage = $("#stage");
+const captionDrag = enableCaptionDrag(caption, () => ({
+  x: 0, y: 0, width: captionStage.clientWidth, height: captionStage.clientHeight,
+}), (rect) => {
+  if (!pet) return;
+  if (rect) native.captionBounds(rect.left / innerWidth, rect.top / innerHeight,
+    rect.right / innerWidth, rect.bottom / innerHeight);
+  else native.captionBounds(0, 0, 0, 0);
+});
 const loops = new Set();
 const timers = new Map();
 let favoriteIds = new Set();
@@ -98,6 +108,7 @@ async function refreshModel() {
   try {
     cancelPlayback();
     view.session = session;
+    document.documentElement.classList.toggle("limited-pet", pet && session.limited);
     showFavorites = false;
     const catalog = session.catalog;
     favoriteIds = new Set(JSON.parse(localStorage.getItem("favorites:" + catalog.id) || "[]"));
@@ -225,8 +236,9 @@ function placeModel() {
   view.model.anchor.set(.5, 1);
   view.model.position.set(width * .5, height * .985);
   if (pet && view.session.limited) {
-    const chest = (view.model.position.y - bounds.height * scale * .64) / height;
-    $("#pet-menu-button").style.top = (100 * chest) + "%";
+    view.menuAnchor = (view.model.position.y - bounds.height * scale * .64) / height;
+    $("#pet-menu-button").style.top = (100 * view.menuAnchor) + "%";
+    positionPetMenu();
   }
 }
 
@@ -368,13 +380,66 @@ function playRandom(kind, filter = () => true) {
   send(kind, choices[Math.floor(Math.random() * choices.length)].id);
 }
 
+
+function enableCaptionDrag(card, bounds, report = () => {}) {
+  let position;
+  let drag;
+  const clamp = (point, size, extent) => {
+    const inset = Math.min(size, extent) / 2;
+    return Math.max(inset, Math.min(extent - inset, point));
+  };
+
+  function layout() {
+    if (!card.hidden && position) {
+      const area = bounds();
+      if (area.width && area.height) {
+        const x = clamp(position.x * area.width, card.offsetWidth, area.width);
+        const y = clamp(position.y * area.height, card.offsetHeight, area.height);
+        card.style.left = (area.x + x) + "px";
+        card.style.top = (area.y + y) + "px";
+        card.style.bottom = "auto";
+        card.style.transform = "translate(-50%, -50%)";
+      }
+    }
+    report(card.hidden ? null : card.getBoundingClientRect());
+  }
+
+  card.addEventListener("pointerdown", (event) => {
+    if (!event.isPrimary || event.button !== 0 || drag) return;
+    const rect = card.getBoundingClientRect();
+    drag = { id: event.pointerId, x: event.clientX - rect.left - rect.width / 2,
+      y: event.clientY - rect.top - rect.height / 2 };
+    card.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  card.addEventListener("pointermove", (event) => {
+    if (drag?.id !== event.pointerId || card.hidden) return;
+    const parent = card.offsetParent.getBoundingClientRect();
+    const area = bounds();
+    if (!area.width || !area.height) return;
+    const x = event.clientX - parent.left - card.offsetParent.clientLeft - drag.x - area.x;
+    const y = event.clientY - parent.top - card.offsetParent.clientTop - drag.y - area.y;
+    position = { x: clamp(x, card.offsetWidth, area.width) / area.width,
+      y: clamp(y, card.offsetHeight, area.height) / area.height };
+    layout();
+  });
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    card.addEventListener(type, (event) => {
+      if (drag?.id === event.pointerId) drag = null;
+    });
+  }
+  new ResizeObserver(layout).observe(card.parentElement);
+  return { layout, get dragging() { return Boolean(drag) && !card.hidden; } };
+}
+
 function stopVoice() {
   ++voiceGeneration;
   if (audioNode) {
     try { audioNode.stop(); } catch {}
     audioNode = null;
   }
-  $("#caption").hidden = true;
+  caption.hidden = true;
+  captionDrag.layout();
   mouth = 0;
 }
 
@@ -398,8 +463,9 @@ async function playVoice(item) {
   audioNode = node;
   node.buffer = buffer;
   node.connect(analyser);
-  $("#caption").textContent = item.caption || item.name;
-  $("#caption").hidden = false;
+  caption.textContent = item.caption || item.name;
+  caption.hidden = false;
+  captionDrag.layout();
   node.onended = () => {
     if (audioNode !== node) return;
     stopVoice();
@@ -461,12 +527,28 @@ async function receiveCommand(command, sound) {
   }
 }
 
+function positionPetMenu() {
+  const menu = $("#pet-menu");
+  if (!view.session?.limited) {
+    menu.style.removeProperty("top");
+    return;
+  }
+  if (menu.hidden) return;
+  const height = $("#stage").clientHeight;
+  const anchor = height * (view.menuAnchor ?? .36);
+  const gap = 22;
+  const limit = height - menu.offsetHeight - 4;
+  const top = anchor + gap <= limit ? anchor + gap : anchor - gap - menu.offsetHeight;
+  menu.style.top = Math.max(4, Math.min(limit, top)) + "px";
+}
+
 function showPetMenu(show = $("#pet-menu").hidden) {
   if (!pet) return;
   $("#pet-menu").hidden = !show;
   if (show) {
     clearTimeout(menuHintTimer);
     $("#pet-menu-button").hidden = true;
+    positionPetMenu();
   } else showMenuHint();
 }
 

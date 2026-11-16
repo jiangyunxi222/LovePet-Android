@@ -2,6 +2,7 @@ package io.bandorilove.pet;
 
 import android.content.Context;
 import android.graphics.Color;
+import android.graphics.RectF;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -24,6 +25,7 @@ final class PetWeb {
     private final WebView view;
     private final boolean desktop;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private volatile RectF captionArea;
 
     PetWeb(Context context, boolean desktop, Runnable pick, Runnable toggle, Runnable openPanel, Runnable rendererGone) {
         this.context = context;
@@ -65,6 +67,9 @@ final class PetWeb {
             @JavascriptInterface public void openPanel() { if (desktop) main.post(openPanel); }
             @JavascriptInterface public void command(String text) { main.post(() -> send(text)); }
             @JavascriptInterface public boolean petShowing() { return PetService.showing(); }
+            @JavascriptInterface public void captionBounds(float left, float top, float right, float bottom) {
+                if (desktop) captionArea = right > left && bottom > top ? new RectF(left, top, right, bottom) : null;
+            }
             @JavascriptInterface public int costume(String identity) {
                 return context.getSharedPreferences("player", Context.MODE_PRIVATE).getInt("costume:" + identity, -1);
             }
@@ -72,6 +77,11 @@ final class PetWeb {
     }
 
     WebView view() { return view; }
+    boolean hitsCaption(float x, float y) {
+        RectF area = captionArea;
+        return area != null && view.getWidth() > 0 && view.getHeight() > 0
+                && area.contains(x / view.getWidth(), y / view.getHeight());
+    }
     void load() { view.loadUrl(HOME + (desktop ? "?pet=1" : "")); }
     void refresh() { evaluate("window.refreshModel?.()"); }
     void status() { evaluate("window.petStatus?.(" + PetService.showing() + ")"); }
