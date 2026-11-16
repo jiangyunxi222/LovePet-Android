@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Gravity;
@@ -20,7 +21,6 @@ import android.widget.Toast;
 import org.json.JSONObject;
 
 import java.lang.ref.WeakReference;
-import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
 
@@ -29,15 +29,18 @@ public final class MainActivity extends Activity {
     private static final int FOLDER = 2;
     private static final int OVERLAY = 3;
     private static final int NOTIFICATION = 4;
+    private static final int JSON = 5;
     private static WeakReference<MainActivity> active = new WeakReference<>(null);
     private final ExecutorService imports = Executors.newSingleThreadExecutor();
     private PetWeb player;
     private ModelStore store;
     private FrameLayout frame;
     private boolean importing;
+    private Uri pendingDocument;
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        if (saved != null) pendingDocument = saved.getParcelable("pendingDocument");
         active = new WeakReference<>(this);
         store = new ModelStore(this);
         frame = new FrameLayout(this);
@@ -117,12 +120,17 @@ public final class MainActivity extends Activity {
     private void choose() {
         if (importing || player == null) return;
         new AlertDialog.Builder(this).setTitle("选择模型")
-                .setItems(new String[] {"选择 ZIP、LPK 或 WPK", "选择已解压的模型目录"}, (dialog, index) -> {
-                    Intent intent = new Intent(index == 0 ? Intent.ACTION_OPEN_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT_TREE);
-                    if (index == 0) intent.setType("*/*").addCategory(Intent.CATEGORY_OPENABLE);
+                .setItems(new String[] {"ZIP（仅限发行包）、LPK 或 WPK", "选择已解压的模型 JSON"}, (dialog, index) -> {
+                    Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    intent.setType("*/*").addCategory(Intent.CATEGORY_OPENABLE);
                     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    startActivityForResult(intent, index == 0 ? ARCHIVE : FOLDER);
+                    startActivityForResult(intent, index == 0 ? ARCHIVE : JSON);
                 }).show();
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        state.putParcelable("pendingDocument", pendingDocument);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
@@ -131,46 +139,85 @@ public final class MainActivity extends Activity {
             if (Settings.canDrawOverlays(this)) launchPet();
             return;
         }
+        Uri selected = request == FOLDER ? pendingDocument : null;
+        if (request == FOLDER) pendingDocument = null;
         if (result != RESULT_OK || data == null || data.getData() == null || importing || player == null) return;
         Uri uri = data.getData();
         if (request == ARCHIVE) {
-            startImport(uri, null);
-        } else if (request == FOLDER) {
-            importing = true;
-            player.progress(true);
-            imports.submit(() -> {
-                try {
-                    List<String> entries = store.folderEntries(uri);
-                    runOnUiThread(() -> chooseEntry(uri, entries));
-                } catch (Exception error) {
-                    runOnUiThread(() -> finishImport(error));
-                }
-            });
+            startImport(uri, null, false);
+        } else if (request == JSON) {
+            findModelFolder(uri);
+        } else if (request == FOLDER && selected != null) {
+            startImport(uri, selected, true);
         }
     }
 
-    private void chooseEntry(Uri uri, List<String> entries) {
-        if (isDestroyed() || player == null) { importing = false; return; }
-        importing = false;
-        player.progress(false);
-        if (entries.isEmpty()) {
-            player.error("请选包含模型 JSON 或 LPK 文件的角色目录");
-        } else if (entries.size() == 1 || entries.get(0).startsWith("00_integrated")) {
-            startImport(uri, entries.get(0));
-        } else {
-            new AlertDialog.Builder(this).setTitle("选择模型 JSON 或 LPK")
-                    .setItems(entries.toArray(new String[0]), (dialog, position) -> startImport(uri, entries.get(position)))
-                    .show();
-        }
-    }
-
-    private void startImport(Uri uri, String entry) {
+    private void findModelFolder(Uri document) {
         importing = true;
         player.progress(true);
         imports.submit(() -> {
             try {
+                String name = store.documentName(document);
+                if (!ModelStore.extension(name).equals("json")) throw new java.io.IOException("请选择模型 JSON 文件");
+                Uri granted = store.grantedFolder(document, name);
+                if (granted != null) {
+                    store.importModel(granted, name);
+                    runOnUiThread(() -> finishImport(null));
+                } else {
+                    runOnUiThread(() -> requestFolder(document, "授权模型所在目录后，即可读取同目录的贴图和动作。"));
+                }
+            } catch (Exception error) {
+                runOnUiThread(() -> finishImport(error));
+            }
+        });
+    }
+
+    private void requestFolder(Uri document, String message) {
+        if (isDestroyed() || player == null) return;
+        importing = false;
+        player.progress(false);
+        new AlertDialog.Builder(this).setMessage(message)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("授权目录", (dialog, button) -> {
+                    pendingDocument = document;
+                    Intent folder = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                    folder.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    folder.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialFolder(document));
+                    startActivityForResult(folder, FOLDER);
+                }).show();
+    }
+
+    private Uri initialFolder(Uri document) {
+        String authority = document.getAuthority();
+        if ("com.android.externalstorage.documents".equals(authority)
+                && DocumentsContract.isDocumentUri(this, document)) {
+            String id = DocumentsContract.getDocumentId(document);
+            int slash = id.lastIndexOf('/');
+            if (slash >= 0) return DocumentsContract.buildDocumentUri(authority, id.substring(0, slash));
+        }
+        return document;
+    }
+
+    private void startImport(Uri uri, Uri selected, boolean persistFolder) {
+        importing = true;
+        player.progress(true);
+        imports.submit(() -> {
+            try {
+                String entry = selected == null ? null : store.documentName(selected);
+                if (selected != null) store.verifySelectedDocument(uri, entry, selected);
                 store.importModel(uri, entry);
+                if (persistFolder) {
+                    try {
+                        getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    } catch (SecurityException ignored) {
+                        // Some document providers grant access only for this import.
+                    }
+                }
                 runOnUiThread(() -> finishImport(null));
+            } catch (ViewerPackage.WorkshopConfigRequired error) {
+                if (selected == null) {
+                    runOnUiThread(() -> requestFolder(uri, "这个 LPK 需要读取同目录的 config.json。"));
+                } else runOnUiThread(() -> finishImport(error));
             } catch (Exception error) {
                 runOnUiThread(() -> finishImport(error));
             }

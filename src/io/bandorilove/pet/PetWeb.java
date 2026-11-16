@@ -76,6 +76,7 @@ final class PetWeb {
     void refresh() { evaluate("window.refreshModel?.()"); }
     void status() { evaluate("window.petStatus?.(" + PetService.showing() + ")"); }
     void progress(boolean busy) { evaluate("window.importProgress?.(" + busy + ")"); }
+    void pinching(boolean active) { evaluate("window.setPetPinching?.(" + active + ")"); }
     void error(String text) { evaluate("window.reportError?.(" + JSONObject.quote(text) + ")"); }
     void receive(JSONObject command, boolean sound) {
         evaluate("window.receiveCommand?.(" + command + "," + sound + ")");
@@ -129,7 +130,8 @@ final class PetWeb {
                 return file.isFile() ? response(mime(asset), new FileInputStream(file)) : missing();
             }
             if (name.equals("index.html") || name.equals("app.js") || name.equals("style.css")
-                    || name.equals("favicon.svg") || name.equals("pixi.min.js") || name.equals("index.min.js")) {
+                    || name.equals("favicon.svg") || name.equals("pixi.min.js") || name.equals("index.min.js")
+                    || name.equals("cubism4.min.js")) {
                 return response(mime(name), context.getAssets().open(name));
             }
         } catch (IOException error) {

@@ -46,7 +46,7 @@ html.pet, .pet body { background: transparent; width: 100%; height: 100%; overfl
 .pet main, .pet #player, .pet #stage { width: 100%; height: 100%; max-width: none; margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; }
 .pet #canvas, .pet #canvas canvas { width: 100%; height: 100%; }
 .pet #caption { font-size: 11px; bottom: 23px; }
-#pet-menu-button { position: fixed; z-index: 2; right: 2px; bottom: 2px; width: 30px; min-height: 30px; padding: 0; background: rgba(255,250,253,.96); }
+#pet-menu-button { position: fixed; z-index: 2; left: 50%; top: 36%; transform: translate(-50%, -50%); width: 32px; min-height: 32px; padding: 0; background: rgba(255,250,253,.96); }
 #pet-menu { position: fixed; z-index: 3; bottom: 37px; right: 4px; display: grid; max-height: calc(100% - 39px); overflow: auto; width: min(120px, 96%); padding: 4px; background: #fffafd; border: 1px solid var(--line); border-radius: 13px; box-shadow: 0 3px 12px rgba(53,28,43,.16); }
 #pet-menu button { min-height: 28px; padding: 2px 7px; border: 0; border-radius: 7px; background: transparent; text-align: left; font-size: 13px; }
 @media (min-width: 620px) and (orientation: landscape) {

@@ -11,6 +11,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class ViewerPackage {
+    static final class WorkshopConfigRequired extends IOException {
+        WorkshopConfigRequired() { super("创意工坊 LPK 需要同目录的 config.json，也可以导入完整 WPK"); }
+    }
     private static final Pattern SUBMODEL = Pattern.compile("(?:^|;)\\s*add_submodel\\s+([0-9a-f]{32}\\.bin3?)(?=\\s|;|$)");
     private static final Pattern TEXTURE = Pattern.compile("(?:^|;)\\s*replace_tex\\s+(\\d{1,5})\\s+([0-9a-f]{32}\\.bin3?)(?=\\s|;|$)");
     private final ModelStore.ZipSource source;
@@ -104,7 +107,7 @@ final class ViewerPackage {
         String id = meta.optString("id");
         if (id.isEmpty() || id.length() > 128) throw new IOException("LPK 缺少有效的模型编号");
         if (!meta.optString("type").equals("STM_1_0")) return name -> mask(id + name);
-        if (workshop == null) throw new IOException("创意工坊 LPK 请使用完整 WPK，或通过模型目录同时导入 config.json");
+        if (workshop == null) throw new WorkshopConfigRequired();
         String item = workshop.optString("fileId");
         if (item.isEmpty()) {
             String file = ModelStore.relative(workshop.getString("lpkFile"));

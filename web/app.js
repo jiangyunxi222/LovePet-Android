@@ -15,6 +15,7 @@ let audioContext, audioNode, analyser, samples;
 let voiceGeneration = 0;
 let mouth = 0;
 let engines;
+let menuHintTimer;
 document.documentElement.classList.toggle("pet", pet);
 
 const asset = (path, base = "/media/" + view.session.version + "/") =>
@@ -36,18 +37,23 @@ function script(url) {
   });
 }
 
-async function loadEngine() {
-  if (!engines) {
-    engines = (async () => {
-      await Promise.all([
-        script("/runtime/live2d.min.js"), script("/runtime/live2dcubismcore.min.js"),
-        script("/pixi.min.js"),
-      ]);
-      await script("/index.min.js");
+function loadEngine(legacy) {
+  if (!engines || (legacy && !engines.legacy)) {
+    const previous = engines?.ready;
+    const engine = { legacy };
+    engines = engine;
+    engine.ready = (async () => {
+      await previous;
+      const core = [];
+      if (!window.PIXI) core.push(script("/pixi.min.js"));
+      if (!window.Live2DCubismCore) core.push(script("/runtime/live2dcubismcore.min.js"));
+      if (legacy && !window.Live2D) core.push(script("/runtime/live2d.min.js"));
+      await Promise.all(core);
+      await script(legacy ? "/index.min.js" : "/cubism4.min.js");
       if (!window.PIXI?.live2d) throw new Error("Live2D 渲染器不可用");
-    })().catch((error) => { engines = null; throw error; });
+    })().catch((error) => { if (engines === engine) engines = null; throw error; });
   }
-  return engines;
+  return engines.ready;
 }
 
 function reportError(text) {
@@ -91,7 +97,6 @@ async function refreshModel() {
   }
   try {
     cancelPlayback();
-    await loadEngine();
     view.session = session;
     showFavorites = false;
     const catalog = session.catalog;
@@ -101,7 +106,8 @@ async function refreshModel() {
     $("#replace").hidden = false;
     $("#controls").hidden = session.limited;
     $("#source").textContent = [catalog.game, catalog.group].filter(Boolean).join(" · ");
-    $("#pet-menu-button").hidden = !pet;
+    $("#pet-menu-button").hidden = $("#pet-menu").hidden = true;
+    clearTimeout(menuHintTimer);
     document.querySelectorAll("#pet-menu [data-loop], #pet-reset").forEach((button) => {
       button.hidden = session.limited;
     });
@@ -109,6 +115,7 @@ async function refreshModel() {
     const selected = catalog.costumes.find((item) => item.id === native.costume(catalog.id || ""));
     setTab("action");
     await selectCostume(selected || catalog.costumes[0]);
+    showMenuHint();
     importProgress(false);
     petStatus(native.petShowing());
   } catch (error) {
@@ -177,16 +184,33 @@ function makeRenderer() {
     view: canvas, context,
     width: stage.clientWidth, height: stage.clientHeight,
     backgroundAlpha: 0, resolution: Math.min(devicePixelRatio, 1.5),
-    autoDensity: true, antialias: true, preserveDrawingBuffer: true,
+    autoDensity: !pet, antialias: true, preserveDrawingBuffer: true,
   });
   const contents = new PIXI.Container();
   PIXI.Ticker.shared.add(() => renderer.render(contents), undefined, PIXI.UPDATE_PRIORITY.LOW);
   stage.append(canvas);
-  const resize = new ResizeObserver(() => {
-    if (!stage.clientWidth || !stage.clientHeight) return;
-    renderer.resize(stage.clientWidth, stage.clientHeight);
-    placeModel();
-  });
+  let pinching = false;
+  let resizeTimer;
+  function syncCanvas() {
+    const { clientWidth: width, clientHeight: height } = stage;
+    if (!width || !height) return;
+    if (Math.abs(renderer.screen.width - width) >= 1 || Math.abs(renderer.screen.height - height) >= 1) {
+      renderer.resize(width, height);
+      placeModel();
+    }
+  }
+  function scheduleCanvasSync() {
+    if (pet) {
+      clearTimeout(resizeTimer);
+      // CSS scales the existing transparent frame while Android tracks two fingers.
+      if (!pinching) resizeTimer = setTimeout(syncCanvas, 80);
+    } else syncCanvas();
+  }
+  if (pet) window.setPetPinching = (active) => {
+    pinching = active;
+    scheduleCanvasSync();
+  };
+  const resize = new ResizeObserver(scheduleCanvasSync);
   resize.observe(stage);
   return { renderer, stage: contents, screen: renderer.screen };
 }
@@ -196,9 +220,14 @@ function placeModel() {
   const { width, height } = view.app.screen;
   const bounds = view.bounds;
   if (!bounds?.width || !bounds.height) return;
-  view.model.scale.set(Math.min(width * .91 / bounds.width, height * .96 / bounds.height));
+  const scale = Math.min(width * .91 / bounds.width, height * .96 / bounds.height);
+  view.model.scale.set(scale);
   view.model.anchor.set(.5, 1);
   view.model.position.set(width * .5, height * .985);
+  if (pet && view.session.limited) {
+    const chest = (view.model.position.y - bounds.height * scale * .64) / height;
+    $("#pet-menu-button").style.top = (100 * chest) + "%";
+  }
 }
 
 function motionFades(model, metadata) {
@@ -220,6 +249,7 @@ async function selectCostume(costume) {
   const generation = ++view.generation;
   $("#loading").hidden = false;
   try {
+    await loadEngine(!costume.cubism3);
     const file = asset(costume.file);
     const raw = await data(file);
     const metadata = preview(raw, costume, file);
@@ -429,11 +459,29 @@ async function receiveCommand(command, sound) {
 }
 
 function showPetMenu(show = $("#pet-menu").hidden) {
-  if (pet) $("#pet-menu").hidden = !show;
+  if (!pet) return;
+  $("#pet-menu").hidden = !show;
+  if (show) {
+    clearTimeout(menuHintTimer);
+    $("#pet-menu-button").hidden = true;
+  } else showMenuHint();
+}
+
+function showMenuHint() {
+  if (!pet || !view.model || !view.session.limited || !$("#pet-menu").hidden) return;
+  const hint = $("#pet-menu-button");
+  hint.hidden = false;
+  clearTimeout(menuHintTimer);
+  menuHintTimer = setTimeout(() => { hint.hidden = true; }, 3000);
 }
 
 function avatarClick(event) {
-  if (!view.model || view.session.limited || !$("#loading").hidden) return;
+  if (!view.model || !$("#loading").hidden) return;
+  if (view.session.limited) {
+    if (pet && !$("#pet-menu").hidden) showPetMenu(false);
+    else showMenuHint();
+    return;
+  }
   const rect = $("#canvas").getBoundingClientRect();
   const point = view.model.toModelPosition(new PIXI.Point(event.clientX - rect.left, event.clientY - rect.top));
   const internal = view.model.internalModel;

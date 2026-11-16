@@ -21,6 +21,9 @@ final class ModelStore {
     static final int JSON_LIMIT = 12 * 1024 * 1024;
     static final String CORE2 = "live2d.min.js";
     static final String CORE3 = "live2dcubismcore.min.js";
+    private static final String CORE3_URL = "https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js";
+    private static final String CORE3_DOWNLOAD_SHA = "25ae938cb4fe282ce189b357bcc97e603d1e1f7ec78bf04150d401c23cdc792f";
+    private static final int RUNTIME_LIMIT = 512_000;
     private static final Map<String, String> RUNTIME = Map.of(
         CORE2, "e4ea1f18bdd44b65394ffd5a1bab16982e88757d45134d1bd0737c8a6b3ddd08",
         CORE3, "913e10e881aa7abec8e65bbb8c2540db3fe9acf987c7537befa521f8a7f51009");
@@ -57,16 +60,42 @@ final class ModelStore {
         }
     }
 
-    List<String> folderEntries(Uri uri) throws IOException {
-        try (TreeSource tree = new TreeSource(context, uri)) {
-            ArrayList<String> entries = new ArrayList<>();
-            for (String file : tree.entries()) {
-                if (modelJson(file) || extension(file).equals("lpk")) entries.add(file);
+    Uri grantedFolder(Uri selected, String name) {
+        for (android.content.UriPermission permission : context.getContentResolver().getPersistedUriPermissions()) {
+            Uri folder = permission.getUri();
+            if (!permission.isReadPermission() || !DocumentsContract.isTreeUri(folder)) continue;
+            try (TreeSource tree = new TreeSource(context, folder)) {
+                if (tree.isSelectedDocument(name, selected)) return folder;
+            } catch (IOException | SecurityException ignored) {
+                // A revoked or unavailable provider can be selected again.
             }
-            entries.sort(Comparator.comparing((String file) -> !file.startsWith("00_integrated"))
-                    .thenComparing(String.CASE_INSENSITIVE_ORDER));
-            return entries;
         }
+        return null;
+    }
+
+    void verifySelectedDocument(Uri folder, String name, Uri selected) throws Exception {
+        try (TreeSource tree = new TreeSource(context, folder)) {
+            if (tree.isSelectedDocument(name, selected)) return;
+            if (tree.has(name)) {
+                try (InputStream original = context.getContentResolver().openInputStream(selected);
+                     InputStream granted = tree.open(name)) {
+                    if (original != null && Arrays.equals(fileHash(original), fileHash(granted))) return;
+                }
+            }
+        }
+        throw new IOException("所授权目录中找不到刚选的模型文件：" + name);
+    }
+
+    private static byte[] fileHash(InputStream input) throws Exception {
+        MessageDigest hash = MessageDigest.getInstance("SHA-256");
+        byte[] buffer = new byte[128 * 1024];
+        long total = 0;
+        for (int size; (size = input.read(buffer)) != -1;) {
+            total += size;
+            if (total > MAX_BYTES) throw new IOException("模型文件超过 2 GB");
+            hash.update(buffer, 0, size);
+        }
+        return hash.digest();
     }
 
     synchronized void importModel(Uri uri, String entry) throws Exception {
@@ -79,7 +108,6 @@ final class ModelStore {
             if (entry != null) {
                 try (TreeSource tree = new TreeSource(context, uri)) {
                     if (extension(entry).equals("lpk")) {
-                        requireRuntime();
                         JSONObject workshop = tree.has("config.json") ? tree.object("config.json") : null;
                         File incoming = new File(staged, "incoming.lpk");
                         try (InputStream stream = tree.open(entry)) {
@@ -92,7 +120,6 @@ final class ModelStore {
                     } else if (tree.has("ControlPanel/library.json") || tree.has("Preview/library.json")) {
                         session = indexed(tree, "", staged, entry);
                     } else {
-                        requireRuntime();
                         session = plain(tree, entry, staged, null);
                     }
                 }
@@ -100,9 +127,8 @@ final class ModelStore {
                 String name = documentName(uri);
                 String extension = extension(name);
                 if (!Set.of("zip", "lpk", "wpk").contains(extension)) {
-                    throw new IOException("请选择 ZIP、LPK 或 WPK。已解压的 JSON 请从模型目录导入。");
+                    throw new IOException("请选择 ZIP、LPK 或 WPK。已解压的模型请选择 JSON 入口。");
                 }
-                if (!extension.equals("zip")) requireRuntime();
                 File incoming = new File(staged, "incoming." + extension);
                 try (InputStream stream = context.getContentResolver().openInputStream(uri)) {
                     if (stream == null) throw new IOException("无法打开文件");
@@ -117,6 +143,7 @@ final class ModelStore {
                 }
                 if (!incoming.delete()) throw new IOException("无法清理临时模型包");
             }
+            requireRuntime(session);
             session.put("version", staged.getName());
             writeJson(new File(staged, "session.json"), session);
             if (!prefs.edit().putString("active", staged.getName()).commit()) {
@@ -172,36 +199,62 @@ final class ModelStore {
         return new JSONObject().put("catalog", catalog).put("limited", false);
     }
 
-    private void requireRuntime() throws IOException {
-        for (String name : RUNTIME.keySet()) {
-            if (runtime(name) == null) {
-                throw new IOException("请先导入一次完整的 BandoriLove 角色包，安装兼容的 Live2D 网页运行库");
+    private void requireRuntime(JSONObject session) throws Exception {
+        JSONArray costumes = session.getJSONObject("catalog").getJSONArray("costumes");
+        for (int i = 0; i < costumes.length(); i++) {
+            if (!costumes.getJSONObject(i).getBoolean("cubism3") && runtime(CORE2) == null) {
+                throw new IOException("该模型使用经典 Cubism 2，请先导入一次含运行库的 BandoriLove 角色包");
             }
         }
+        if (runtime(CORE3) != null) return;
+        byte[] data;
+        javax.net.ssl.HttpsURLConnection connection = (javax.net.ssl.HttpsURLConnection)
+                new java.net.URL(CORE3_URL).openConnection();
+        connection.setConnectTimeout(8_000);
+        connection.setReadTimeout(8_000);
+        connection.setInstanceFollowRedirects(false);
+        try {
+            if (connection.getResponseCode() != 200) throw new IOException("HTTP " + connection.getResponseCode());
+            try (InputStream source = connection.getInputStream()) {
+                data = readBytes(source, RUNTIME_LIMIT);
+            }
+        } catch (IOException error) {
+            throw new IOException("无法下载 Live2D 官方运行库。请联网后重试，或导入一次完整角色包。", error);
+        } finally {
+            connection.disconnect();
+        }
+        if (!CORE3_DOWNLOAD_SHA.equals(hex(MessageDigest.getInstance("SHA-256").digest(data)))) {
+            throw new IOException("Live2D 官方运行库版本已变化。可导入完整角色包使用随包运行库。");
+        }
+        saveRuntime(CORE3, data);
     }
 
     private void installRuntime(Source source, String prefix) throws Exception {
         Map<String, byte[]> scripts = new LinkedHashMap<>();
         for (Map.Entry<String, String> item : RUNTIME.entrySet()) {
-            byte[] data = source.bytes(prefix + "ControlPanel/web/vendor/" + item.getKey(), 512_000);
+            byte[] data = source.bytes(prefix + "ControlPanel/web/vendor/" + item.getKey(), RUNTIME_LIMIT);
             if (!hex(MessageDigest.getInstance("SHA-256").digest(data)).equals(item.getValue())) {
                 throw new IOException("角色包的 Live2D 网页运行库版本不受支持");
             }
             scripts.put(item.getKey(), data);
         }
-        mkdir(runtimes);
         for (Map.Entry<String, byte[]> script : scripts.entrySet()) {
-            File out = new File(runtimes, script.getKey());
-            if (out.isFile() && Arrays.equals(java.nio.file.Files.readAllBytes(out.toPath()), script.getValue())) continue;
-            android.util.AtomicFile atomic = new android.util.AtomicFile(out);
-            FileOutputStream output = atomic.startWrite();
-            try {
-                output.write(script.getValue());
-                atomic.finishWrite(output);
-            } catch (IOException error) {
-                atomic.failWrite(output);
-                throw error;
-            }
+            saveRuntime(script.getKey(), script.getValue());
+        }
+    }
+
+    private void saveRuntime(String name, byte[] data) throws IOException {
+        mkdir(runtimes);
+        File out = new File(runtimes, name);
+        if (out.isFile() && Arrays.equals(java.nio.file.Files.readAllBytes(out.toPath()), data)) return;
+        android.util.AtomicFile atomic = new android.util.AtomicFile(out);
+        FileOutputStream output = atomic.startWrite();
+        try {
+            output.write(data);
+            atomic.finishWrite(output);
+        } catch (IOException error) {
+            atomic.failWrite(output);
+            throw error;
         }
     }
 
@@ -250,7 +303,9 @@ final class ModelStore {
         for (String file : zip.entries()) {
             if (file.equals("manifest.json") || file.matches("[^/]+/manifest\\.json")) manifests.add(file);
         }
-        if (manifests.size() != 1) throw new IOException("请选择 BandoriLove 单角色 ZIP");
+        if (manifests.size() != 1) {
+            throw new IOException("ZIP 仅支持 BandoriLove 单角色发行包。第三方 ZIP 请解压后选择模型 JSON。");
+        }
         String manifest = manifests.get(0);
         return manifest.substring(0, manifest.length() - "manifest.json".length());
     }
@@ -342,13 +397,8 @@ final class ModelStore {
         abstract InputStream open(String file) throws IOException;
         abstract boolean has(String file) throws IOException;
         byte[] bytes(String file, int max) throws IOException {
-            try (InputStream stream = open(file); ByteArrayOutputStream result = new ByteArrayOutputStream()) {
-                byte[] buffer = new byte[32768];
-                for (int count; (count = stream.read(buffer)) != -1;) {
-                    if (result.size() + count > max) throw new IOException("模型配置过大");
-                    result.write(buffer, 0, count);
-                }
-                return result.toByteArray();
+            try (InputStream stream = open(file)) {
+                return readBytes(stream, max);
             }
         }
         String text(String file) throws IOException {
@@ -356,6 +406,16 @@ final class ModelStore {
         }
         JSONObject object(String file) throws Exception { return new JSONObject(text(file)); }
         @Override public abstract void close() throws IOException;
+    }
+
+    private static byte[] readBytes(InputStream stream, int max) throws IOException {
+        ByteArrayOutputStream result = new ByteArrayOutputStream();
+        byte[] buffer = new byte[32768];
+        for (int count; (count = stream.read(buffer)) != -1;) {
+            if (result.size() + count > max) throw new IOException("模型配置过大");
+            result.write(buffer, 0, count);
+        }
+        return result.toByteArray();
     }
 
     static final class ZipSource extends Source {
@@ -403,7 +463,11 @@ final class ModelStore {
             this.root = root;
             this.rootId = DocumentsContract.getTreeDocumentId(root);
         }
-        Set<String> entries() throws IOException { return children(rootId).keySet(); }
+        boolean isSelectedDocument(String name, Uri selected) throws IOException {
+            return java.util.Objects.equals(root.getAuthority(), selected.getAuthority())
+                    && DocumentsContract.isDocumentUri(context, selected)
+                    && DocumentsContract.getDocumentId(selected).equals(find(name));
+        }
         private Map<String, String> children(String parent) throws IOException {
             Map<String, String> known = directories.get(parent);
             if (known != null) return known;

@@ -16,6 +16,7 @@ $classes = Join-Path $work 'classes'
 $dex = Join-Path $work 'dex'
 New-Item -ItemType Directory -Force $work,$dist,$assets,$classes,$dex | Out-Null
 Copy-Item -Path (Join-Path $PSScriptRoot 'web/*') -Destination $assets -Force
+Copy-Item -Path (Join-Path $PSScriptRoot 'vendor/*') -Destination $assets -Force
 foreach ($name in @('pixi.min.js','index.min.js')) {
     Copy-Item -LiteralPath (Join-Path $repo "panel/web/vendor/$name") -Destination (Join-Path $assets $name) -Force
     $oldAsset = Join-Path $assets "vendor/$name"
@@ -29,7 +30,7 @@ $output = Join-Path $dist 'BandoriLovePet.apk'
 $env:JAVA_HOME = $Jdk
 $env:PATH = (Join-Path $Jdk 'bin') + [IO.Path]::PathSeparator + $env:PATH
 & (Join-Path $tools 'aapt2.exe') compile --dir (Join-Path $PSScriptRoot 'res') -o $compiled
-& (Join-Path $tools 'aapt2.exe') link -I $api --manifest (Join-Path $PSScriptRoot 'AndroidManifest.xml') --debug-mode --version-code 3 --version-name 0.1.0-dev.3 --java $work -A $assets -0 js -o $unsigned $compiled
+& (Join-Path $tools 'aapt2.exe') link -I $api --manifest (Join-Path $PSScriptRoot 'AndroidManifest.xml') --debug-mode --version-code 4 --version-name 0.1.0-dev.4 --java $work -A $assets -0 js -o $unsigned $compiled
 $javaSources = @(Get-ChildItem -LiteralPath $source -Recurse -Filter '*.java' | ForEach-Object FullName)
 $javaSources += Join-Path $work 'io/bandorilove/pet/R.java'
 & (Join-Path $Jdk 'bin/javac.exe') --release 11 -encoding UTF-8 -cp $api -d $classes @javaSources

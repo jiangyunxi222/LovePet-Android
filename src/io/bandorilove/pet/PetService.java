@@ -24,6 +24,7 @@ public final class PetService extends Service {
     private PetWeb player;
     private WindowManager window;
     private WindowManager.LayoutParams frame;
+    private Rect screen;
     private FrameLayout container;
     private SharedPreferences saved;
 
@@ -72,10 +73,10 @@ public final class PetService extends Service {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         frame.gravity = Gravity.TOP | Gravity.LEFT;
-        Rect screen = window.getCurrentWindowMetrics().getBounds();
+        screen = window.getCurrentWindowMetrics().getBounds();
         frame.x = saved.getInt("x", screen.width() - frame.width);
         frame.y = saved.getInt("y", screen.height() - frame.height - dp(80));
-        place(frame.x, frame.y);
+        place(frame.x, frame.y, width);
         player = new PetWeb(overlay, true, () -> {}, this::stopSelf, () -> startActivity(panelIntent()), this::stopSelf);
         container = new DragFrame(overlay);
         container.addView(player.view(), new FrameLayout.LayoutParams(-1, -1));
@@ -89,17 +90,25 @@ public final class PetService extends Service {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private void place(int x, int y) {
-        Rect screen = window.getCurrentWindowMetrics().getBounds();
+    private void place(int x, int y, int width) {
+        int height = Math.round(width * 1.45f);
         int margin = dp(42);
-        frame.x = Math.max(margin - frame.width, Math.min(screen.width() - margin, x));
-        frame.y = Math.max(margin - frame.height, Math.min(screen.height() - margin, y));
+        x = Math.max(margin - width, Math.min(screen.width() - margin, x));
+        y = Math.max(margin - height, Math.min(screen.height() - margin, y));
+        if (frame.x == x && frame.y == y && frame.width == width && frame.height == height) return;
+        frame.x = x;
+        frame.y = y;
+        frame.width = width;
+        frame.height = height;
         if (container != null && container.isAttachedToWindow()) window.updateViewLayout(container, frame);
     }
 
     @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
         super.onConfigurationChanged(configuration);
-        if (frame != null) place(frame.x, frame.y);
+        if (frame != null) {
+            screen = window.getCurrentWindowMetrics().getBounds();
+            place(frame.x, frame.y, frame.width);
+        }
     }
 
     @Override public void onDestroy() {
@@ -128,34 +137,67 @@ public final class PetService extends Service {
 
     private final class DragFrame extends FrameLayout {
         private final int slop;
-        private final ScaleGestureDetector scale;
+        private final Runnable drawFrame = this::applyFrame;
         private float startX;
         private float startY;
         private int windowX;
         private int windowY;
         private boolean dragging;
         private boolean pinching;
-        private float width;
+        private int firstFinger;
+        private int secondFinger;
+        private float initialSpan;
+        private int initialWidth;
+        private float anchorX;
+        private float anchorY;
+        private boolean framePending;
+        private int nextX, nextY, nextWidth;
 
         DragFrame(Context context) {
             super(context);
             slop = ViewConfiguration.get(context).getScaledTouchSlop();
-            scale = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                @Override public boolean onScaleBegin(ScaleGestureDetector detector) {
-                    width = frame.width;
-                    return true;
-                }
-                @Override public boolean onScale(ScaleGestureDetector detector) {
-                    width = Math.max(dp(96), Math.min(dp(380), width * detector.getScaleFactor()));
-                    int x = frame.x + (frame.width - Math.round(width)) / 2;
-                    int bottom = frame.y + frame.height;
-                    frame.width = Math.round(width);
-                    frame.height = Math.round(width * 1.45f);
-                    place(x, bottom - frame.height);
-                    return true;
-                }
-            });
-            scale.setQuickScaleEnabled(false);
+        }
+
+        private void queueFrame(int x, int y, int width) {
+            nextX = x;
+            nextY = y;
+            nextWidth = width;
+            if (!framePending) {
+                framePending = true;
+                postOnAnimation(drawFrame);
+            }
+        }
+
+        private void applyFrame() {
+            if (!framePending) return;
+            framePending = false;
+            place(nextX, nextY, nextWidth);
+        }
+
+        private void beginPinch(MotionEvent event) {
+            removeCallbacks(drawFrame);
+            applyFrame();
+            firstFinger = event.getPointerId(0);
+            secondFinger = event.getPointerId(event.getActionIndex());
+            float x = event.getRawX(0), y = event.getRawY(0);
+            float otherX = event.getRawX(event.getActionIndex()), otherY = event.getRawY(event.getActionIndex());
+            initialSpan = Math.max(1, (float) Math.hypot(x - otherX, y - otherY));
+            initialWidth = frame.width;
+            anchorX = ((x + otherX) / 2 - frame.x) / frame.width;
+            anchorY = ((y + otherY) / 2 - frame.y) / frame.height;
+        }
+
+        private void movePinch(MotionEvent event) {
+            int first = event.findPointerIndex(firstFinger);
+            int second = event.findPointerIndex(secondFinger);
+            if (first < 0 || second < 0) return;
+            float x = event.getRawX(first), y = event.getRawY(first);
+            float otherX = event.getRawX(second), otherY = event.getRawY(second);
+            float span = (float) Math.hypot(x - otherX, y - otherY);
+            int width = Math.max(dp(96), Math.min(dp(380), Math.round(initialWidth * span / initialSpan)));
+            int height = Math.round(width * 1.45f);
+            queueFrame(Math.round((x + otherX) / 2 - anchorX * width),
+                    Math.round((y + otherY) / 2 - anchorY * height), width);
         }
 
         @Override public boolean dispatchTouchEvent(MotionEvent event) {
@@ -170,19 +212,25 @@ public final class PetService extends Service {
             if (action == MotionEvent.ACTION_POINTER_DOWN && !pinching) {
                 if (!dragging) cancelChild(event);
                 pinching = true;
+                beginPinch(event);
+                player.pinching(true);
             }
-            scale.onTouchEvent(event);
-            if (!pinching && action == MotionEvent.ACTION_MOVE) {
+            if (pinching && (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_POINTER_UP)) {
+                movePinch(event);
+            } else if (!pinching && action == MotionEvent.ACTION_MOVE) {
                 float dx = event.getRawX() - startX;
                 float dy = event.getRawY() - startY;
                 if (!dragging && Math.hypot(dx, dy) > slop) {
                     cancelChild(event);
                     dragging = true;
                 }
-                if (dragging) place(windowX + Math.round(dx), windowY + Math.round(dy));
+                if (dragging) queueFrame(windowX + Math.round(dx), windowY + Math.round(dy), frame.width);
             }
             if (!dragging && !pinching) return super.dispatchTouchEvent(event);
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                removeCallbacks(drawFrame);
+                applyFrame();
+                if (pinching) player.pinching(false);
                 saved.edit().putInt("x", frame.x).putInt("y", frame.y).putInt("width", frame.width).apply();
             }
             return true;
