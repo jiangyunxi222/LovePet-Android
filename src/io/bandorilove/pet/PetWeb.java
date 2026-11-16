@@ -124,11 +124,11 @@ final class PetWeb {
                 return file.isFile() ? response(mime(asset), new FileInputStream(file)) : missing();
             }
             if (name.equals("index.html") || name.equals("app.js") || name.equals("style.css")
-                    || name.equals("favicon.svg") || name.equals("vendor/pixi.min.js") || name.equals("vendor/index.min.js")) {
+                    || name.equals("favicon.svg") || name.equals("pixi.min.js") || name.equals("index.min.js")) {
                 return response(mime(name), context.getAssets().open(name));
             }
         } catch (IOException error) {
-            Log.d("BandoriLove", "Resource unavailable: " + name);
+            Log.d("BandoriLove", "Resource unavailable: " + name, error);
         }
         return missing();
     }

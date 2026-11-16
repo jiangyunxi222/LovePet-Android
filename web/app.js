@@ -41,9 +41,9 @@ async function loadEngine() {
     engines = (async () => {
       await Promise.all([
         script("/runtime/live2d.min.js"), script("/runtime/live2dcubismcore.min.js"),
-        script("/vendor/pixi.min.js"),
+        script("/pixi.min.js"),
       ]);
-      await script("/vendor/index.min.js");
+      await script("/index.min.js");
       if (!window.PIXI?.live2d) throw new Error("Live2D 渲染器不可用");
     })().catch((error) => { engines = null; throw error; });
   }
@@ -168,19 +168,27 @@ function preview(raw, costume, file) {
 
 function makeRenderer() {
   const stage = $("#canvas");
-  const app = new PIXI.Application({
+  const canvas = document.createElement("canvas");
+  const attributes = { alpha: true, stencil: true, antialias: true, preserveDrawingBuffer: true };
+  const context = canvas.getContext("webgl2", attributes) || canvas.getContext("webgl", attributes);
+  if (!context) throw new Error("此设备的 Android WebView 无法创建 WebGL 画布");
+  // Some Android GPU configurations support WebGL 2 while blocking WebGL 1.
+  const renderer = new PIXI.Renderer({
+    view: canvas, context,
     width: stage.clientWidth, height: stage.clientHeight,
     backgroundAlpha: 0, resolution: Math.min(devicePixelRatio, 1.5),
     autoDensity: true, antialias: true, preserveDrawingBuffer: true,
   });
-  stage.append(app.view);
+  const contents = new PIXI.Container();
+  PIXI.Ticker.shared.add(() => renderer.render(contents), undefined, PIXI.UPDATE_PRIORITY.LOW);
+  stage.append(canvas);
   const resize = new ResizeObserver(() => {
     if (!stage.clientWidth || !stage.clientHeight) return;
-    app.renderer.resize(stage.clientWidth, stage.clientHeight);
+    renderer.resize(stage.clientWidth, stage.clientHeight);
     placeModel();
   });
   resize.observe(stage);
-  return app;
+  return { renderer, stage: contents, screen: renderer.screen };
 }
 
 function placeModel() {

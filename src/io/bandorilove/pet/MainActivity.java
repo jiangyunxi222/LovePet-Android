@@ -43,14 +43,16 @@ public final class MainActivity extends Activity {
             return all;
         });
         getWindow().setDecorFitsSystemWindows(false);
-        getWindow().getInsetsController().setSystemBarsAppearance(
-                android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-                    | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-                android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-                    | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
         player = new PetWeb(this, false, this::choose, this::togglePet, () -> {});
         frame.addView(player.view(), new FrameLayout.LayoutParams(-1, -1));
         setContentView(frame);
+        frame.post(() -> {
+            android.view.WindowInsetsController bars = frame.getWindowInsetsController();
+            if (bars == null) return;
+            int appearance = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            bars.setSystemBarsAppearance(appearance, appearance);
+        });
         player.load();
     }
 
