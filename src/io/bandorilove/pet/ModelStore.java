@@ -60,19 +60,6 @@ final class ModelStore {
         }
     }
 
-    Uri grantedFolder(Uri selected, String name) {
-        for (android.content.UriPermission permission : context.getContentResolver().getPersistedUriPermissions()) {
-            Uri folder = permission.getUri();
-            if (!permission.isReadPermission() || !DocumentsContract.isTreeUri(folder)) continue;
-            try (TreeSource tree = new TreeSource(context, folder)) {
-                if (tree.isSelectedDocument(name, selected)) return folder;
-            } catch (IOException | SecurityException ignored) {
-                // A revoked or unavailable provider can be selected again.
-            }
-        }
-        return null;
-    }
-
     void verifySelectedDocument(Uri folder, String name, Uri selected) throws Exception {
         try (TreeSource tree = new TreeSource(context, folder)) {
             if (tree.isSelectedDocument(name, selected)) return;
@@ -106,28 +93,23 @@ final class ModelStore {
         try {
             JSONObject session;
             if (entry != null) {
+                if (!extension(entry).equals("lpk")) throw new IOException("请选择 ZIP、LPK 或 WPK 模型包。");
                 try (TreeSource tree = new TreeSource(context, uri)) {
-                    if (extension(entry).equals("lpk")) {
-                        JSONObject workshop = tree.has("config.json") ? tree.object("config.json") : null;
-                        File incoming = new File(staged, "incoming.lpk");
-                        try (InputStream stream = tree.open(entry)) {
-                            copy(stream, incoming, MAX_BYTES, null);
-                        }
-                        try (ZipSource source = new ZipSource(incoming)) {
-                            session = ViewerPackage.loadLpk(source, staged, workshop);
-                        }
-                        if (!incoming.delete()) throw new IOException("无法清理临时模型包");
-                    } else if (tree.has("ControlPanel/library.json") || tree.has("Preview/library.json")) {
-                        session = indexed(tree, "", staged, entry);
-                    } else {
-                        session = plain(tree, entry, staged, null);
+                    JSONObject workshop = tree.has("config.json") ? tree.object("config.json") : null;
+                    File incoming = new File(staged, "incoming.lpk");
+                    try (InputStream stream = tree.open(entry)) {
+                        copy(stream, incoming, MAX_BYTES, null);
                     }
+                    try (ZipSource source = new ZipSource(incoming)) {
+                        session = ViewerPackage.loadLpk(source, staged, workshop);
+                    }
+                    if (!incoming.delete()) throw new IOException("无法清理临时模型包");
                 }
             } else {
                 String name = documentName(uri);
                 String extension = extension(name);
                 if (!Set.of("zip", "lpk", "wpk").contains(extension)) {
-                    throw new IOException("请选择 ZIP、LPK 或 WPK。已解压的模型请选择 JSON 入口。");
+                    throw new IOException("请选择 ZIP、LPK 或 WPK 模型包。");
                 }
                 File incoming = new File(staged, "incoming." + extension);
                 try (InputStream stream = context.getContentResolver().openInputStream(uri)) {
@@ -136,7 +118,7 @@ final class ModelStore {
                 }
                 try (ZipSource source = new ZipSource(incoming)) {
                     if (extension.equals("zip")) {
-                        session = indexed(source, rolePrefix(source), staged, null);
+                        session = indexed(source, rolePrefix(source), staged);
                     } else {
                         session = ViewerPackage.load(source, staged, extension);
                     }
@@ -156,8 +138,8 @@ final class ModelStore {
         }
     }
 
-    private JSONObject indexed(Source source, String prefix, File folder, String entry) throws Exception {
-        JSONObject session = prepareIndexed(source, prefix, folder, entry);
+    private JSONObject indexed(Source source, String prefix, File folder) throws Exception {
+        JSONObject session = prepareIndexed(source, prefix, folder, null);
         installRuntime(source, prefix);
         return session;
     }
@@ -304,7 +286,7 @@ final class ModelStore {
             if (file.equals("manifest.json") || file.matches("[^/]+/manifest\\.json")) manifests.add(file);
         }
         if (manifests.size() != 1) {
-            throw new IOException("ZIP 仅支持 BandoriLove 单角色发行包。第三方 ZIP 请解压后选择模型 JSON。");
+            throw new IOException("ZIP 仅支持 BandoriLove 单角色发行包。第三方模型请选择 LPK 或 WPK。");
         }
         String manifest = manifests.get(0);
         return manifest.substring(0, manifest.length() - "manifest.json".length());

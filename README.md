@@ -2,7 +2,7 @@
 
 适用于 Android 11 及以上版本，使用系统提供的 Android System WebView。调试包由独立 Android 分支构建。
 
-- ZIP 仅支持 BandoriLove 单角色发行包。第三方模型可选择 LPK、WPK 或已解压的模型 JSON。首次选 JSON 后，Android 会要求授权它所在的目录，以读取贴图等资源。创意工坊 LPK 缺少配置时也可授权同目录的 `config.json`。
+- ZIP 仅支持 BandoriLove 单角色发行包。第三方模型可选择 LPK 或 WPK。创意工坊 LPK 缺少配置时，可授权其所在目录以读取 `config.json`。
 - 普通 Cubism 3 及以上模型首次导入时会联网获取并校验 Live2D 官方运行库。经典 Cubism 2 模型需要从含运行库的 BandoriLove 角色包初始化。完整角色包带动作、表情、衣装、语音和字幕。
 - 点「显示桌宠」，授予系统的浮窗权限。可拖动角色、双指缩放。完整角色包用腿部触控区打开菜单，普通模型点角色可短暂显示胸前的「⋯」。也可从控制台或系统通知退出桌宠。
 - Android 通过系统浮窗显示桌宠。Windows 的 Live2DViewerEX 连接和桌面层级由 Windows 版提供。
