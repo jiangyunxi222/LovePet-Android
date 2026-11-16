@@ -80,7 +80,7 @@ function petStatus(showing) {
 
 function title(text) {
   $("#name").textContent = text;
-  document.title = text + " · BandoriLove";
+  document.title = text + " · BandoriLovePet";
 }
 
 async function refreshModel() {
@@ -224,7 +224,7 @@ async function selectCostume(costume) {
     const raw = await data(file);
     const metadata = preview(raw, costume, file);
     metadata.url = file;
-    view.app ??= makeRenderer();
+    if (!view.app) view.app = makeRenderer();
     const next = await PIXI.live2d.Live2DModel.from(metadata, { autoInteract: false, motionPreload: "NONE" });
     if (generation !== view.generation) {
       next.destroy({ children: true });
@@ -291,7 +291,9 @@ function renderItems() {
     }
     list.append(row);
   }
-  $("#items").replaceChildren(list);
+  const container = $("#items");
+  container.textContent = "";
+  container.append(list);
   $("#empty").hidden = Boolean(entries.length);
   updateLoops();
 }
@@ -346,7 +348,7 @@ function stopVoice() {
 async function playVoice(item) {
   stopVoice();
   const generation = voiceGeneration;
-  audioContext ??= new AudioContext();
+  if (!audioContext) audioContext = new AudioContext();
   if (!analyser) {
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 256;

@@ -47,10 +47,10 @@ public final class PetService extends Service {
 
     private Notification notification() {
         NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(new NotificationChannel("pet", "BandoriLove 桌宠", NotificationManager.IMPORTANCE_LOW));
+        manager.createNotificationChannel(new NotificationChannel("pet", "BandoriLovePet", NotificationManager.IMPORTANCE_LOW));
         PendingIntent panel = PendingIntent.getActivity(this, 1, panelIntent(), PendingIntent.FLAG_IMMUTABLE);
         PendingIntent stop = PendingIntent.getService(this, 2, new Intent(this, PetService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE);
-        return new Notification.Builder(this, "pet").setContentTitle("BandoriLove 桌宠")
+        return new Notification.Builder(this, "pet").setContentTitle("BandoriLovePet")
                 .setContentText("拖动角色移动，双指缩放")
                 .setSmallIcon(R.drawable.pet_icon).setContentIntent(panel).setOngoing(true)
                 .addAction(new Notification.Action.Builder(null, "退出桌宠", stop).build()).build();
@@ -76,7 +76,7 @@ public final class PetService extends Service {
         frame.x = saved.getInt("x", screen.width() - frame.width);
         frame.y = saved.getInt("y", screen.height() - frame.height - dp(80));
         place(frame.x, frame.y);
-        player = new PetWeb(overlay, true, () -> {}, this::stopSelf, () -> startActivity(panelIntent()));
+        player = new PetWeb(overlay, true, () -> {}, this::stopSelf, () -> startActivity(panelIntent()), this::stopSelf);
         container = new DragFrame(overlay);
         container.addView(player.view(), new FrameLayout.LayoutParams(-1, -1));
         window.addView(container, frame);

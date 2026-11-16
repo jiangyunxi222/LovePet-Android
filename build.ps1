@@ -25,11 +25,11 @@ Copy-Item -LiteralPath (Join-Path $repo 'panel/web/favicon.svg'),(Join-Path $rep
 $compiled = Join-Path $work 'resources.zip'
 $unsigned = Join-Path $work 'base.apk'
 $aligned = Join-Path $work 'aligned.apk'
-$output = Join-Path $dist 'BandoriLove-Android-debug.apk'
+$output = Join-Path $dist 'BandoriLovePet.apk'
 $env:JAVA_HOME = $Jdk
 $env:PATH = (Join-Path $Jdk 'bin') + [IO.Path]::PathSeparator + $env:PATH
 & (Join-Path $tools 'aapt2.exe') compile --dir (Join-Path $PSScriptRoot 'res') -o $compiled
-& (Join-Path $tools 'aapt2.exe') link -I $api --manifest (Join-Path $PSScriptRoot 'AndroidManifest.xml') --debug-mode --version-code 2 --version-name 0.1.0-dev --java $work -A $assets -0 js -o $unsigned $compiled
+& (Join-Path $tools 'aapt2.exe') link -I $api --manifest (Join-Path $PSScriptRoot 'AndroidManifest.xml') --debug-mode --version-code 3 --version-name 0.1.0-dev.3 --java $work -A $assets -0 js -o $unsigned $compiled
 $javaSources = @(Get-ChildItem -LiteralPath $source -Recurse -Filter '*.java' | ForEach-Object FullName)
 $javaSources += Join-Path $work 'io/bandorilove/pet/R.java'
 & (Join-Path $Jdk 'bin/javac.exe') --release 11 -encoding UTF-8 -cp $api -d $classes @javaSources

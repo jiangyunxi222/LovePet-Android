@@ -25,7 +25,7 @@ final class PetWeb {
     private final boolean desktop;
     private final Handler main = new Handler(Looper.getMainLooper());
 
-    PetWeb(Context context, boolean desktop, Runnable pick, Runnable toggle, Runnable openPanel) {
+    PetWeb(Context context, boolean desktop, Runnable pick, Runnable toggle, Runnable openPanel, Runnable rendererGone) {
         this.context = context;
         this.desktop = desktop;
         store = new ModelStore(context);
@@ -44,6 +44,11 @@ final class PetWeb {
             }
             @Override public WebResourceResponse shouldInterceptRequest(WebView window, WebResourceRequest request) {
                 return respond(request.getUrl());
+            }
+            @Override public boolean onRenderProcessGone(WebView window, RenderProcessGoneDetail detail) {
+                Log.e("BandoriLovePet", "WebView renderer exited (crash: " + detail.didCrash() + ")");
+                rendererGone.run();
+                return true;
             }
         });
         view.setWebChromeClient(new WebChromeClient() {

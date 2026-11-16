@@ -7,9 +7,14 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.util.Log;
+import android.view.Gravity;
 import android.view.WindowInsets;
 import android.webkit.WebView;
+import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONObject;
@@ -28,14 +33,14 @@ public final class MainActivity extends Activity {
     private final ExecutorService imports = Executors.newSingleThreadExecutor();
     private PetWeb player;
     private ModelStore store;
+    private FrameLayout frame;
     private boolean importing;
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         active = new WeakReference<>(this);
-        WebView.setWebContentsDebuggingEnabled(true);
         store = new ModelStore(this);
-        FrameLayout frame = new FrameLayout(this);
+        frame = new FrameLayout(this);
         frame.setBackgroundColor(Color.rgb(250, 246, 249));
         frame.setOnApplyWindowInsetsListener((view, all) -> {
             android.graphics.Insets bars = all.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
@@ -43,8 +48,6 @@ public final class MainActivity extends Activity {
             return all;
         });
         getWindow().setDecorFitsSystemWindows(false);
-        player = new PetWeb(this, false, this::choose, this::togglePet, () -> {});
-        frame.addView(player.view(), new FrameLayout.LayoutParams(-1, -1));
         setContentView(frame);
         frame.post(() -> {
             android.view.WindowInsetsController bars = frame.getWindowInsetsController();
@@ -53,7 +56,50 @@ public final class MainActivity extends Activity {
                     | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
             bars.setSystemBarsAppearance(appearance, appearance);
         });
-        player.load();
+        attachPlayer();
+    }
+
+    private void attachPlayer() {
+        frame.removeAllViews();
+        try {
+            if (WebView.getCurrentWebViewPackage() == null) {
+                throw new IllegalStateException("Android WebView provider is unavailable");
+            }
+            WebView.setWebContentsDebuggingEnabled(true);
+            player = new PetWeb(this, false, this::choose, this::togglePet, () -> {},
+                    () -> showPlayerError("网页渲染进程已退出，请重试。若再次发生，请更新系统 WebView。"));
+            frame.addView(player.view(), new FrameLayout.LayoutParams(-1, -1));
+            player.load();
+        } catch (RuntimeException | LinkageError error) {
+            Log.e("BandoriLovePet", "WebView initialization failed", error);
+            showPlayerError("系统 WebView 无法启动。请启用或更新 Android System WebView，然后重试。");
+        }
+    }
+
+    private void showPlayerError(String message) {
+        releasePlayer();
+        LinearLayout status = new LinearLayout(this);
+        status.setOrientation(LinearLayout.VERTICAL);
+        status.setGravity(Gravity.CENTER);
+        int padding = Math.round(28 * getResources().getDisplayMetrics().density);
+        status.setPadding(padding, padding, padding, padding);
+        TextView detail = new TextView(this);
+        detail.setText(message);
+        detail.setTextSize(16);
+        detail.setGravity(Gravity.CENTER);
+        status.addView(detail);
+        Button retry = new Button(this);
+        retry.setText("重试");
+        retry.setOnClickListener(view -> attachPlayer());
+        status.addView(retry);
+        frame.addView(status, new FrameLayout.LayoutParams(-1, -1));
+    }
+
+    private void releasePlayer() {
+        if (player == null) return;
+        frame.removeView(player.view());
+        player.destroy();
+        player = null;
     }
 
     @Override protected void onResume() {
@@ -64,13 +110,12 @@ public final class MainActivity extends Activity {
     @Override protected void onDestroy() {
         if (active.get() == this) active.clear();
         imports.shutdown();
-        ((FrameLayout) player.view().getParent()).removeView(player.view());
-        player.destroy();
+        releasePlayer();
         super.onDestroy();
     }
 
     private void choose() {
-        if (importing) return;
+        if (importing || player == null) return;
         new AlertDialog.Builder(this).setTitle("选择模型")
                 .setItems(new String[] {"选择 ZIP、LPK 或 WPK", "选择已解压的模型目录"}, (dialog, index) -> {
                     Intent intent = new Intent(index == 0 ? Intent.ACTION_OPEN_DOCUMENT : Intent.ACTION_OPEN_DOCUMENT_TREE);
@@ -86,7 +131,7 @@ public final class MainActivity extends Activity {
             if (Settings.canDrawOverlays(this)) launchPet();
             return;
         }
-        if (result != RESULT_OK || data == null || data.getData() == null || importing) return;
+        if (result != RESULT_OK || data == null || data.getData() == null || importing || player == null) return;
         Uri uri = data.getData();
         if (request == ARCHIVE) {
             startImport(uri, null);
@@ -105,7 +150,7 @@ public final class MainActivity extends Activity {
     }
 
     private void chooseEntry(Uri uri, List<String> entries) {
-        if (isDestroyed()) return;
+        if (isDestroyed() || player == null) { importing = false; return; }
         importing = false;
         player.progress(false);
         if (entries.isEmpty()) {
@@ -135,6 +180,7 @@ public final class MainActivity extends Activity {
     private void finishImport(Exception error) {
         if (isDestroyed()) return;
         importing = false;
+        if (player == null) return;
         if (error == null) {
             player.refresh();
             PetService.refresh();
@@ -150,7 +196,7 @@ public final class MainActivity extends Activity {
             stopService(new Intent(this, PetService.class));
         } else if (!importing && store.active() != null) {
             if (Settings.canDrawOverlays(this)) launchPet();
-            else new AlertDialog.Builder(this).setMessage("显示桌宠需要允许 BandoriLove 显示在其他应用上层。")
+            else new AlertDialog.Builder(this).setMessage("显示桌宠需要允许 BandoriLovePet 显示在其他应用上层。")
                     .setNegativeButton("取消", null)
                     .setPositiveButton("前往设置", (dialog, button) -> startActivityForResult(
                             new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())), OVERLAY))
@@ -179,17 +225,17 @@ public final class MainActivity extends Activity {
         try {
             startForegroundService(new Intent(this, PetService.class));
         } catch (IllegalStateException | SecurityException error) {
-            Toast.makeText(this, "请保持 BandoriLove 在前台并重试", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "请保持 BandoriLovePet 在前台并重试", Toast.LENGTH_SHORT).show();
         }
     }
 
     static void petChanged() {
         MainActivity current = active.get();
-        if (current != null) current.player.status();
+        if (current != null && current.player != null) current.player.status();
     }
 
     static void receive(JSONObject command) {
         MainActivity current = active.get();
-        if (current != null) current.player.receive(command, !PetService.showing());
+        if (current != null && current.player != null) current.player.receive(command, !PetService.showing());
     }
 }
