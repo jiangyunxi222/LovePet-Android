@@ -233,15 +233,18 @@ function placeModel() {
 function motionFades(model, metadata) {
   const manager = model.internalModel.motionManager;
   const sourceFades = view.session.catalog.motionFadePolicy === "source";
+  const modern = Boolean(metadata.FileReferences);
+  const motions = modern ? metadata.FileReferences.Motions : metadata.motions;
   manager.on("motionLoaded", (group, index, motion) => {
-    const definition = (metadata.FileReferences?.Motions || metadata.motions || {})[group]?.[index];
-    const fadeIn = definition?.FadeInTime ?? definition?.fade_in;
-    const fadeOut = definition?.FadeOutTime ?? definition?.fade_out;
-    const multiplier = metadata.FileReferences ? 1 : 1000;
-    motion.setFadeInTime?.(sourceFades ? (fadeIn ?? 1) : 0);
-    motion.setFadeOutTime?.(sourceFades ? (fadeOut ?? 1) : 0);
-    motion.setFadeIn?.(sourceFades ? (fadeIn ?? 1) * multiplier : 0);
-    motion.setFadeOut?.(sourceFades ? (fadeOut ?? 1) * multiplier : 0);
+    const definition = motions?.[group]?.[index];
+    // Cubism 3 uses seconds and Cubism 2 uses milliseconds in both the settings and the setter.
+    if (modern) {
+      motion.setFadeInTime?.(sourceFades ? (definition?.FadeInTime ?? 1) : 0);
+      motion.setFadeOutTime?.(sourceFades ? (definition?.FadeOutTime ?? 1) : 0);
+    } else {
+      motion.setFadeIn?.(sourceFades ? (definition?.fade_in ?? 1000) : 0);
+      motion.setFadeOut?.(sourceFades ? (definition?.fade_out ?? 1000) : 0);
+    }
   });
 }
 
