@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>BandoriLove 桌宠</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header id="toolbar">
+    <div class="brand"><img src="/favicon.svg" alt=""><span>BandoriLove</span></div>
+    <button id="replace" hidden>更换模型</button>
+  </header>
+  <main>
+    <section id="welcome" hidden>
+      <div class="welcome-card">
+        <img src="/favicon.svg" alt="">
+        <h1>导入模型</h1>
+        <p>选择 ZIP、LPK 或 WPK，也可打开已解压的模型目录。</p>
+        <button class="primary" id="choose">选择模型</button>
+      </div>
+    </section>
+    <p id="status" role="status" hidden></p>
+    <section id="player" hidden>
+      <div class="title-row">
+        <div><p id="source"></p><h1 id="name"></h1></div>
+        <button id="toggle" class="primary" disabled>显示桌宠</button>
+      </div>
+      <div id="stage">
+        <div id="canvas" aria-label="Live2D 模型预览"></div>
+        <p id="loading" role="status" hidden>正在加载模型…</p>
+        <p id="caption" hidden></p>
+      </div>
+      <section id="controls" aria-label="角色控制" hidden>
+        <nav aria-label="角色内容">
+          <button data-tab="action" aria-pressed="true">动作</button>
+          <button data-tab="expression" aria-pressed="false">表情</button>
+          <button data-tab="costume" aria-pressed="false">衣装</button>
+          <button data-tab="voice" aria-pressed="false">语音</button>
+        </nav>
+        <div class="filters">
+          <input id="filter" type="search" placeholder="搜索动作" aria-label="搜索当前列表">
+          <button id="favorites" aria-pressed="false" aria-label="只看收藏">♡</button>
+          <button id="loop" aria-pressed="false">循环</button>
+          <button id="reset" aria-label="恢复待机">复位</button>
+        </div>
+        <ul id="items"></ul>
+        <p id="empty" hidden>没有匹配的项目</p>
+      </section>
+    </section>
+  </main>
+  <button id="pet-menu-button" aria-label="桌宠菜单" hidden>⋯</button>
+  <div id="pet-menu" aria-label="桌宠菜单" hidden>
+    <button id="open-panel">打开面板</button>
+    <button data-loop="action">循环动作</button>
+    <button data-loop="voice">循环语音</button>
+    <button data-loop="costume">循环换装</button>
+    <button id="pet-reset">恢复待机</button>
+    <button id="exit-pet">退出桌宠</button>
+  </div>
+</body>
+</html>
