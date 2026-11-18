@@ -3,30 +3,40 @@
 const $ = (selector) => document.querySelector(selector);
 const native = window.AndroidPet;
 const pet = new URLSearchParams(location.search).get("pet") === "1";
+const wallpaper = new URLSearchParams(location.search).get("wallpaper") === "1";
+let wallpaperVisible = true;
 const names = { action: "动作", expression: "表情", costume: "衣装", voice: "语音" };
 const view = { session: null, costume: null, model: null, app: null, generation: 0, tab: "action" };
 const caption = $("#caption");
+let captionCardsEnabled = native.captionCardsEnabled();
 const captionStage = $("#stage");
-const captionDrag = enableCaptionDrag(caption, () => ({
-  x: 0, y: 0, width: captionStage.clientWidth, height: captionStage.clientHeight,
-}), (rect) => {
-  if (!pet) return;
-  if (rect) native.captionBounds(rect.left / innerWidth, rect.top / innerHeight,
-    rect.right / innerWidth, rect.bottom / innerHeight);
-  else native.captionBounds(0, 0, 0, 0);
+const petMenu = $("#pet-menu");
+const petMenuButton = $("#pet-menu-button");
+const settings = $("#settings");
+const appPrompt = $("#app-prompt");
+let promptId, promptCallback, noticeTimer;
+let desktopCrop;
+const captionDrag = enableCaptionDrag(caption, desktopControlArea, (rect) => {
+  if (pet) reportPetBounds("caption", rect);
 });
 const loops = new Set();
 const timers = new Map();
 let favoriteIds = new Set();
 let showFavorites = false;
-let linked = false;
+let overlayVisible = false;
+let controlsCollapsed = localStorage.getItem("controlsCollapsed") === "true";
 let busy = false;
+let wallpaperApplied = false;
+let wallpaperChanging = false;
 let audioContext, audioNode, analyser, samples;
 let voiceGeneration = 0;
 let mouth = 0;
 let engines;
 let menuHintTimer;
+const previewControlTimers = new Map();
+const reportedControls = new Map();
 document.documentElement.classList.toggle("pet", pet);
+document.documentElement.classList.toggle("wallpaper", wallpaper);
 
 const asset = (path, base = "/media/" + view.session.version + "/") =>
   new URL(path.split("/").map(encodeURIComponent).join("/"), location.origin + base).href;
@@ -76,21 +86,82 @@ function importProgress(on) {
   busy = on;
   $("#replace").disabled = $("#choose").disabled = on;
   $("#toggle").disabled = on || !view.model;
+  updateWallpaperButton();
   $("#status").classList.remove("error");
   $("#status").textContent = on ? "正在导入模型…" : "";
   $("#status").hidden = !on;
 }
 
-function petStatus(showing) {
-  linked = showing;
+function petStatus(showing, visible, homeOnly) {
   $("#toggle").textContent = showing ? "退出桌宠" : "显示桌宠";
   $("#toggle").disabled = busy || !view.model;
-  if (pet) return;
-  if (showing) {
+  updateWallpaperButton();
+  $("#mode-top").checked = !homeOnly;
+  $("#mode-home").checked = homeOnly;
+  if (homeOnly) $("#usage-access").hidden = true;
+  if (overlayVisible === visible) return;
+  overlayVisible = visible;
+  if (pet && !visible && !petMenu.hidden) showPetMenu(false);
+  if (!ownsPlayback()) {
     stopVoice();
     for (const timer of timers.values()) clearTimeout(timer);
   } else {
     for (const kind of loops) schedule(kind, 400);
+  }
+}
+
+function updateWallpaperButton() {
+  $("#apply-wallpaper").disabled = busy || wallpaperChanging || (!view.model && !wallpaperApplied);
+  $("#apply-wallpaper").textContent = wallpaperChanging ? "正在设置…" : wallpaperApplied ? "退出壁纸" : "显示壁纸";
+  $("#welcome-wallpaper").hidden = !wallpaperApplied;
+  $("#welcome-wallpaper").disabled = wallpaperChanging;
+}
+window.setHomeWallpaperState = (applied, changing) => {
+  wallpaperApplied = applied;
+  wallpaperChanging = changing;
+  updateWallpaperButton();
+};
+
+window.setPermissionStatus = (overlay, usage, notifications, wallpaperMode) => {
+  for (const [id, granted] of [["overlay", overlay], ["usage", usage], ["notifications", notifications]]) {
+    const status = $("#perm-" + id);
+    status.dataset.status = granted ? "allowed" : "off";
+    status.textContent = granted ? "已允许" : "未允许";
+  }
+  const messages = {
+    system: ["系统确认", "点「显示壁纸」后选择主屏幕。如果确认后没有切换，请在应用信息中检查是否有「动态壁纸服务」权限。"],
+    unsupported: ["系统不支持", "当前设备或用户配置不支持设置壁纸。"],
+    restricted: ["系统限制", "当前用户或工作资料的系统策略限制了壁纸设置。"],
+  };
+  const [status, detail] = messages[wallpaperMode] || messages.system;
+  $("#perm-wallpaper").textContent = status;
+  $("#perm-wallpaper-detail").textContent = detail;
+};
+
+function updateControlsVisibility() {
+  const limited = view.session?.limited;
+  $("#role-settings").hidden = limited;
+  $("#controls").hidden = limited || controlsCollapsed;
+  document.documentElement.classList.toggle("preview-only", !pet && (limited || controlsCollapsed));
+  const immersive = !pet && !wallpaper && !!view.session
+    && (controlsCollapsed || document.documentElement.classList.contains("scene-edit"));
+  if (document.documentElement.classList.contains("immersive-preview") !== immersive) {
+    document.documentElement.classList.toggle("immersive-preview", immersive);
+    native.immersivePreview(immersive);
+  }
+  revealPreviewControls();
+  $("#controls-toggle").checked = !controlsCollapsed;
+}
+
+function revealPreviewControls(edge) {
+  const root = document.documentElement;
+  for (const side of edge ? [edge] : ["top", "bottom"]) {
+    const hidden = "preview-" + side + "-hidden";
+    clearTimeout(previewControlTimers.get(side));
+    root.classList.remove(hidden);
+    if (root.classList.contains("immersive-preview")) {
+      previewControlTimers.set(side, setTimeout(() => root.classList.add(hidden), 2600));
+    }
   }
 }
 
@@ -102,22 +173,32 @@ function title(text) {
 async function refreshModel() {
   const session = await data("/session");
   if (!session) {
+    cancelPlayback();
+    ++view.generation;
+    for (const model of view.app?.stage.removeChildren() || []) model.destroy({ children: true });
+    view.session = view.model = view.costume = null;
+    $("#player").hidden = $("#replace").hidden = true;
     $("#welcome").hidden = false;
+    updateControlsVisibility();
+    importProgress(false);
     return;
   }
   try {
     cancelPlayback();
     view.session = session;
-    document.documentElement.classList.toggle("limited-pet", pet && session.limited);
     showFavorites = false;
     const catalog = session.catalog;
-    favoriteIds = new Set(JSON.parse(localStorage.getItem("favorites:" + catalog.id) || "[]"));
+    favoriteIds = readFavoriteIds();
     $("#welcome").hidden = true;
     $("#player").hidden = false;
     $("#replace").hidden = false;
-    $("#controls").hidden = session.limited;
+    updateControlsVisibility();
     $("#source").textContent = [catalog.game, catalog.group].filter(Boolean).join(" · ");
-    $("#pet-menu-button").hidden = $("#pet-menu").hidden = true;
+    petMenuButton.hidden = petMenu.hidden = true;
+    if (pet) {
+      reportPetBounds("menu", null);
+      reportPetBounds("menuButton", null);
+    }
     clearTimeout(menuHintTimer);
     document.querySelectorAll("#pet-menu [data-loop], #pet-reset").forEach((button) => {
       button.hidden = session.limited;
@@ -126,9 +207,10 @@ async function refreshModel() {
     const selected = catalog.costumes.find((item) => item.id === native.costume(catalog.id || ""));
     setTab("action");
     await selectCostume(selected || catalog.costumes[0]);
+    window.modelPreviewChanged?.();
     showMenuHint();
     importProgress(false);
-    petStatus(native.petShowing());
+    petStatus(native.petShowing(), native.petVisible(), native.homeOnly());
   } catch (error) {
     importProgress(false);
     reportError(error.message);
@@ -188,26 +270,34 @@ function makeRenderer() {
   const stage = $("#canvas");
   const canvas = document.createElement("canvas");
   const attributes = { alpha: true, stencil: true, antialias: true, preserveDrawingBuffer: true };
-  const context = canvas.getContext("webgl2", attributes) || canvas.getContext("webgl", attributes);
+  const context = canvas.getContext("webgl2", attributes)
+    || canvas.getContext("webgl", { ...attributes, antialias: false });
   if (!context) throw new Error("此设备的 Android WebView 无法创建 WebGL 画布");
   // Some Android GPU configurations support WebGL 2 while blocking WebGL 1.
   const renderer = new PIXI.Renderer({
     view: canvas, context,
     width: stage.clientWidth, height: stage.clientHeight,
     backgroundAlpha: 0, resolution: Math.min(devicePixelRatio, 1.5),
-    autoDensity: !pet, antialias: true, preserveDrawingBuffer: true,
+    autoDensity: !pet, antialias: context.getContextAttributes().antialias, preserveDrawingBuffer: true,
   });
   const contents = new PIXI.Container();
-  PIXI.Ticker.shared.add(() => renderer.render(contents), undefined, PIXI.UPDATE_PRIORITY.LOW);
   stage.append(canvas);
   let pinching = false;
   let resizeTimer;
+  const readAlpha = makeAlphaSampler(canvas);
+  const sampleTouchMask = pet ? makeTouchSampler(readAlpha) : null;
+  PIXI.Ticker.shared.add(() => {
+    if ((wallpaper && !wallpaperVisible) || (!wallpaper && document.hidden)) return;
+    renderer.render(contents);
+    if (sampleTouchMask && overlayVisible && view.model && !pinching) sampleTouchMask(view.model);
+  }, undefined, PIXI.UPDATE_PRIORITY.LOW);
   function syncCanvas() {
     const { clientWidth: width, clientHeight: height } = stage;
     if (!width || !height) return;
     if (Math.abs(renderer.screen.width - width) >= 1 || Math.abs(renderer.screen.height - height) >= 1) {
       renderer.resize(width, height);
       placeModel();
+      renderer.render(contents);
     }
   }
   function scheduleCanvasSync() {
@@ -221,9 +311,83 @@ function makeRenderer() {
     pinching = active;
     scheduleCanvasSync();
   };
-  const resize = new ResizeObserver(scheduleCanvasSync);
+  const resize = new ResizeObserver(() => {
+    scheduleCanvasSync();
+    if (pet) {
+      positionPetMenu();
+      if (!petMenuButton.hidden) reportPetBounds("menuButton", petMenuButton.getBoundingClientRect());
+    }
+  });
   resize.observe(stage);
-  return { renderer, stage: contents, screen: renderer.screen };
+  return { renderer, stage: contents, screen: renderer.screen, readAlpha };
+}
+
+const touchColumns = 40, touchRows = 58;
+function makeAlphaSampler(canvas) {
+  const sample = document.createElement("canvas");
+  sample.width = touchColumns;
+  sample.height = touchRows;
+  const pixels = sample.getContext("2d", { willReadFrequently: true });
+  return () => {
+    pixels.clearRect(0, 0, touchColumns, touchRows);
+    pixels.drawImage(canvas, 0, 0, touchColumns, touchRows);
+    return pixels.getImageData(0, 0, touchColumns, touchRows).data;
+  };
+}
+
+function makeTouchSampler(readAlpha) {
+  let lastSample = 0, lastMask = "", lastModel;
+  return (model) => {
+    const now = performance.now();
+    if (now - lastSample < 145) return;
+    lastSample = now;
+    const data = readAlpha();
+    let mask = "";
+    for (let i = 3; i < data.length; i += 4) mask += data[i] >= 28 ? "1" : "0";
+    const hasBody = mask.includes("1");
+    const changedModel = hasBody && model !== lastModel;
+    if (mask !== lastMask || changedModel) {
+      native.modelTouchMask(mask, changedModel);
+      lastMask = mask;
+      if (hasBody) lastModel = model;
+    }
+  };
+}
+
+function fitVisibleModel(width, height) {
+  const { model, app } = view;
+  const previous = view.visibleFit;
+  if (previous?.model === model && Math.abs(previous.aspect - width / height) < .006) {
+    model.scale.set(previous.scale * width);
+    model.position.set(previous.x * width, previous.y * height);
+    return { top: previous.top * height, height: previous.height * height };
+  }
+  app.renderer.render(app.stage);
+  const data = app.readAlpha();
+  let left = touchColumns, right = 0, top = touchRows, bottom = 0;
+  for (let row = 0; row < touchRows; row++) {
+    for (let col = 0; col < touchColumns; col++) {
+      if (data[(row * touchColumns + col) * 4 + 3] < 28) continue;
+      left = Math.min(left, col);
+      right = Math.max(right, col + 1);
+      top = Math.min(top, row);
+      bottom = Math.max(bottom, row + 1);
+    }
+  }
+  if (right - left < 2 || bottom - top < 2) return;
+  const centerX = (left + right) * width / (2 * touchColumns);
+  const centerY = (top + bottom) * height / (2 * touchRows);
+  const zoom = Math.min(.86 * touchColumns / (right - left), .86 * touchRows / (bottom - top), 2.4);
+  model.scale.set(model.scale.x * zoom);
+  model.position.set(width / 2 + (model.position.x - centerX) * zoom,
+    height / 2 + (model.position.y - centerY) * zoom);
+  const fittedHeight = (bottom - top) * height * zoom / touchRows;
+  const fittedTop = (height - fittedHeight) / 2;
+  view.visibleFit = {
+    model, aspect: width / height, scale: model.scale.x / width,
+    x: model.position.x / width, y: model.position.y / height, top: fittedTop / height, height: fittedHeight / height,
+  };
+  return { top: fittedTop, height: fittedHeight };
 }
 
 function placeModel() {
@@ -231,13 +395,17 @@ function placeModel() {
   const { width, height } = view.app.screen;
   const bounds = view.bounds;
   if (!bounds?.width || !bounds.height) return;
-  const scale = Math.min(width * .91 / bounds.width, height * .96 / bounds.height);
+  const fitVisible = pet || wallpaper || document.documentElement.classList.contains("immersive-preview");
+  const scale = Math.min(width * (fitVisible ? .72 : .91) / bounds.width,
+    height * (fitVisible ? .66 : .96) / bounds.height);
   view.model.scale.set(scale);
-  view.model.anchor.set(.5, 1);
-  view.model.position.set(width * .5, height * .985);
+  view.model.anchor.set(.5, fitVisible ? .5 : 1);
+  view.model.position.set(width * .5, height * (fitVisible ? .5 : .985));
+  const fitted = fitVisible ? fitVisibleModel(width, height) : null;
   if (pet && view.session.limited) {
-    view.menuAnchor = (view.model.position.y - bounds.height * scale * .64) / height;
-    $("#pet-menu-button").style.top = (100 * view.menuAnchor) + "%";
+    view.menuAnchor = fitted ? (fitted.top + fitted.height * .36) / height : .36;
+    petMenuButton.style.top = (100 * view.menuAnchor) + "%";
+    if (!petMenuButton.hidden) reportPetBounds("menuButton", petMenuButton.getBoundingClientRect());
     positionPetMenu();
   }
 }
@@ -277,6 +445,7 @@ async function selectCostume(costume) {
     }
     const outgoing = view.app.stage.removeChildren();
     view.model = next;
+    view.visibleFit = null;
     view.costume = costume;
     view.bounds = next.getLocalBounds();
     const controllers = raw[raw.FileReferences ? "Controllers" : "controllers"];
@@ -289,6 +458,7 @@ async function selectCostume(costume) {
     view.app.renderer.render(view.app.stage);
     for (const model of outgoing) model.destroy({ children: true });
     renderItems();
+    updateWallpaperButton();
   } finally {
     if (generation === view.generation) $("#loading").hidden = true;
   }
@@ -355,6 +525,10 @@ function setTab(tab) {
   renderItems();
 }
 
+function readFavoriteIds() {
+  return new Set(JSON.parse(localStorage.getItem("favorites:" + view.session.catalog.id) || "[]"));
+}
+
 function updateLoops() {
   $("#loop").setAttribute("aria-pressed", String(loops.has(view.tab)));
   document.querySelectorAll("[data-loop]").forEach((node) =>
@@ -366,7 +540,7 @@ function send(type, id = 0, kind = "") {
   native.command(JSON.stringify({ type, id, kind, role: view.session.catalog.id }));
 }
 
-function ownsPlayback() { return pet || !linked; }
+function ownsPlayback() { return wallpaper ? wallpaperVisible : pet === overlayVisible; }
 
 function schedule(kind, ms) {
   clearTimeout(timers.get(kind));
@@ -380,6 +554,10 @@ function playRandom(kind, filter = () => true) {
   send(kind, choices[Math.floor(Math.random() * choices.length)].id);
 }
 
+function playInteraction(kind, filter = () => true) {
+  const favorites = native.interactionFavoritesOnly() ? readFavoriteIds() : null;
+  playRandom(kind, (item) => filter(item) && (!favorites || favorites.has(item.flag)));
+}
 
 function enableCaptionDrag(card, bounds, report = () => {}) {
   let position;
@@ -390,11 +568,12 @@ function enableCaptionDrag(card, bounds, report = () => {}) {
   };
 
   function layout() {
-    if (!card.hidden && position) {
+    if (!card.hidden && (position || pet)) {
       const area = bounds();
       if (area.width && area.height) {
-        const x = clamp(position.x * area.width, card.offsetWidth, area.width);
-        const y = clamp(position.y * area.height, card.offsetHeight, area.height);
+        card.style.maxWidth = area.width * .94 + "px";
+        const x = clamp((position?.x ?? .5) * area.width, card.offsetWidth, area.width);
+        const y = clamp((position?.y ?? .94) * area.height, card.offsetHeight, area.height);
         card.style.left = (area.x + x) + "px";
         card.style.top = (area.y + y) + "px";
         card.style.bottom = "auto";
@@ -443,6 +622,13 @@ function stopVoice() {
   mouth = 0;
 }
 
+window.setCaptionCardsEnabled = (enabled) => {
+  captionCardsEnabled = enabled;
+  $("#caption-cards").checked = enabled;
+  caption.hidden = !enabled || !audioNode;
+  captionDrag.layout();
+};
+
 async function playVoice(item) {
   stopVoice();
   const generation = voiceGeneration;
@@ -464,8 +650,7 @@ async function playVoice(item) {
   node.buffer = buffer;
   node.connect(analyser);
   caption.textContent = item.caption || item.name;
-  caption.hidden = false;
-  captionDrag.layout();
+  window.setCaptionCardsEnabled(native.captionCardsEnabled());
   node.onended = () => {
     if (audioNode !== node) return;
     stopVoice();
@@ -527,48 +712,86 @@ async function receiveCommand(command, sound) {
   }
 }
 
-function positionPetMenu() {
-  const menu = $("#pet-menu");
-  if (!view.session?.limited) {
-    menu.style.removeProperty("top");
-    return;
-  }
-  if (menu.hidden) return;
-  const height = $("#stage").clientHeight;
-  const anchor = height * (view.menuAnchor ?? .36);
-  const gap = 22;
-  const limit = height - menu.offsetHeight - 4;
-  const top = anchor + gap <= limit ? anchor + gap : anchor - gap - menu.offsetHeight;
-  menu.style.top = Math.max(4, Math.min(limit, top)) + "px";
+function reportPetBounds(name, rect) {
+  const bounds = rect && innerWidth && innerHeight
+    ? [rect.left / innerWidth, rect.top / innerHeight, rect.right / innerWidth, rect.bottom / innerHeight]
+    : [0, 0, 0, 0];
+  const key = bounds.join(",");
+  if (reportedControls.get(name) === key) return;
+  reportedControls.set(name, key);
+  native.controlBounds(name, ...bounds);
 }
 
-function showPetMenu(show = $("#pet-menu").hidden) {
-  if (!pet) return;
-  $("#pet-menu").hidden = !show;
+function desktopControlArea() {
+  const width = captionStage.clientWidth, height = captionStage.clientHeight;
+  if (!pet || !desktopCrop) return { x: 0, y: 0, width, height };
+  const [left, top, right, bottom] = desktopCrop;
+  return { x: left * width, y: top * height, width: (right - left) * width, height: (bottom - top) * height };
+}
+
+window.setDesktopCrop = (...bounds) => {
+  desktopCrop = bounds;
+  captionDrag.layout();
+  positionPetMenu();
+};
+
+function positionPetMenu() {
+  if (petMenu.hidden) return;
+  const area = desktopControlArea();
+  petMenu.style.maxWidth = Math.max(0, area.width - 8) + "px";
+  petMenu.style.maxHeight = Math.max(0, area.height - 8) + "px";
+  const right = area.x + area.width - petMenu.offsetWidth - 4;
+  const bottom = area.y + area.height - petMenu.offsetHeight - 4;
+  let left = right;
+  let top = bottom;
+  if (view.session?.limited) {
+    const anchor = captionStage.clientHeight * (view.menuAnchor ?? .36);
+    const gap = 22;
+    top = anchor + gap <= bottom ? anchor + gap : anchor - gap - petMenu.offsetHeight;
+    left = (captionStage.clientWidth - petMenu.offsetWidth) / 2;
+  }
+  petMenu.style.top = Math.max(area.y + 4, Math.min(bottom, top)) + "px";
+  petMenu.style.left = Math.max(area.x + 4, Math.min(right, left)) + "px";
+  reportPetBounds("menu", petMenu.getBoundingClientRect());
+}
+
+function showPetMenu(show = petMenu.hidden) {
+  if (!pet && !wallpaper) return;
+  petMenu.hidden = !show;
   if (show) {
     clearTimeout(menuHintTimer);
-    $("#pet-menu-button").hidden = true;
+    petMenuButton.hidden = true;
+    reportPetBounds("menuButton", null);
+    petMenu.scrollTop = 0;
     positionPetMenu();
-  } else showMenuHint();
+  } else {
+    reportPetBounds("menu", null);
+    showMenuHint();
+  }
 }
 
 function showMenuHint() {
-  if (!pet || !view.model || !view.session.limited || !$("#pet-menu").hidden) return;
-  const hint = $("#pet-menu-button");
-  hint.hidden = false;
+  if ((!pet && !wallpaper) || !view.model || !view.session.limited || !petMenu.hidden) return;
+  petMenuButton.hidden = false;
+  reportPetBounds("menuButton", petMenuButton.getBoundingClientRect());
   clearTimeout(menuHintTimer);
-  menuHintTimer = setTimeout(() => { hint.hidden = true; }, 3000);
+  menuHintTimer = setTimeout(() => {
+    petMenuButton.hidden = true;
+    reportPetBounds("menuButton", null);
+  }, 3000);
 }
 
 function avatarClick(event) {
   if (!view.model || !$("#loading").hidden) return;
   if (view.session.limited) {
-    if (pet && !$("#pet-menu").hidden) showPetMenu(false);
+    if ((pet || wallpaper) && !petMenu.hidden) showPetMenu(false);
     else showMenuHint();
     return;
   }
   const rect = $("#canvas").getBoundingClientRect();
-  const point = view.model.toModelPosition(new PIXI.Point(event.clientX - rect.left, event.clientY - rect.top));
+  const point = view.model.toModelPosition(new PIXI.Point(
+    (event.clientX - rect.left) * view.app.screen.width / rect.width,
+    (event.clientY - rect.top) * view.app.screen.height / rect.height));
   const internal = view.model.internalModel;
   if (view.costume.cubism3) {
     point.x = (point.x - internal.originalWidth / 2) / internal.pixelsPerUnit;
@@ -577,18 +800,124 @@ function avatarClick(event) {
   const regions = view.costume.hitRegions || {};
   const contains = (box) => box && point.x >= box[0] && point.x <= box[2] && point.y >= box[1] && point.y <= box[3];
   const region = ["menu", "expression", "voice", "left", "right", "body", "wardrobe"].find((name) => contains(regions[name]));
-  if (region === "menu") showPetMenu(true);
-  else if (region === "wardrobe") playRandom("costume");
-  else if (region === "voice" || region === "expression") playRandom(region);
-  else if (region) playRandom("action", (item) => item.category === region);
+  if (region === "menu") showPetMenu();
+  else if (region === "wardrobe") playInteraction("costume");
+  else if (region === "voice" || region === "expression") playInteraction(region);
+  else if (region) playInteraction("action", (item) => item.category === region);
 }
 
-for (const selector of ["#choose", "#replace"]) $(selector).onclick = () => native.pickModel();
+$("#choose").onclick = () => native.pickModel();
+$("#replace").onclick = () => window.openModelLibrary?.();
 for (const selector of ["#toggle", "#exit-pet"]) $(selector).onclick = () => native.togglePet();
 for (const selector of ["#reset", "#pet-reset"]) $(selector).onclick = () => send("reset");
 $("#open-panel").onclick = () => { showPetMenu(false); native.openPanel(); };
-$("#pet-menu-button").onclick = () => showPetMenu();
-$("#canvas").onclick = avatarClick;
+$("#close-pet-menu").onclick = () => showPetMenu(false);
+petMenuButton.onclick = () => showPetMenu();
+$("#placement").onclick = () => {
+  const homeOnly = native.homeOnly();
+  $("#mode-top").checked = !homeOnly;
+  $("#mode-home").checked = homeOnly;
+  $("#favorite-interactions").checked = native.interactionFavoritesOnly();
+  $("#caption-cards").checked = captionCardsEnabled;
+  $("#usage-access").hidden = !homeOnly || native.canUseHomeMode();
+  if (!settings.open) {
+    native.settingsVisible(true);
+    settings.showModal();
+  }
+};
+$("#settings-close").onclick = () => settings.close();
+const permissions = $("#permission-config");
+$("#open-permissions").onclick = () => {
+  if (!permissions.open) permissions.showModal();
+  syncAppModalVisibility();
+  native.refreshPermissions();
+};
+$("#close-permissions").onclick = () => permissions.close();
+permissions.addEventListener("close", syncAppModalVisibility);
+permissions.querySelectorAll("[data-permission]").forEach(control => {
+  control.onclick = () => native.openPermission(control.dataset.permission);
+});
+settings.addEventListener("close", () => {
+  syncAppModalVisibility();
+  revealPreviewControls();
+});
+function syncAppModalVisibility() {
+  native.settingsVisible(!!document.querySelector("dialog[open]"));
+}
+window.showAppPrompt = (id, title, message, action, callback) => {
+  promptId = id;
+  promptCallback = callback;
+  appPrompt.returnValue = "";
+  $("#app-prompt-title").textContent = title;
+  $("#app-prompt-message").textContent = message;
+  $("#app-prompt-cancel").hidden = !action;
+  $("#app-prompt-confirm").textContent = action || "知道了";
+  if (!appPrompt.open) appPrompt.showModal();
+  syncAppModalVisibility();
+};
+appPrompt.addEventListener("close", () => {
+  syncAppModalVisibility();
+  const confirmed = appPrompt.returnValue === "confirm";
+  if (promptCallback) promptCallback(confirmed);
+  else if (Number.isInteger(promptId)) native.answerPrompt(promptId, confirmed);
+  revealPreviewControls();
+});
+window.showAppNotice = (message) => {
+  const notice = $("#app-notice");
+  notice.textContent = message;
+  notice.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { notice.hidden = true; }, 3200);
+};
+settings.addEventListener("click", (event) => {
+  if (event.target !== settings) return;
+  const rect = settings.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
+    settings.close();
+  }
+});
+$("#mode-top").onchange = () => {
+  $("#usage-access").hidden = true;
+  native.setHomeOnly(false);
+};
+$("#mode-home").onchange = () => {
+  if (native.canUseHomeMode()) native.setHomeOnly(true);
+  else {
+    $("#mode-top").checked = true;
+    $("#usage-access").hidden = false;
+  }
+};
+$("#grant-usage").onclick = () => native.setHomeOnly(true);
+$("#favorite-interactions").onchange = (event) => native.setInteractionFavoritesOnly(event.target.checked);
+$("#caption-cards").onchange = (event) => {
+  const enabled = event.target.checked;
+  window.setCaptionCardsEnabled(enabled);
+  native.setCaptionCardsEnabled(enabled);
+};
+$("#controls-toggle").onchange = (event) => {
+  controlsCollapsed = !event.target.checked;
+  localStorage.setItem("controlsCollapsed", String(controlsCollapsed));
+  updateControlsVisibility();
+  settings.close();
+};
+$("#canvas").onclick = (event) => {
+  if (document.documentElement.classList.contains("scene-edit")) {
+    if (document.documentElement.classList.contains("scene-preview")) avatarClick(event);
+    return;
+  }
+  avatarClick(event);
+};
+$("#stage").addEventListener("click", (event) => {
+  const root = document.documentElement;
+  if (!root.classList.contains("immersive-preview") || root.classList.contains("scene-edit")) return;
+  const { top, bottom } = event.currentTarget.getBoundingClientRect();
+  const edge = event.clientY < top + 64 ? "top" : event.clientY > bottom - 64 ? "bottom" : null;
+  if (!edge || !root.classList.contains("preview-" + edge + "-hidden")) return;
+  revealPreviewControls(edge);
+  event.stopPropagation();
+}, { capture: true });
+$("#toolbar").addEventListener("pointerdown", () => revealPreviewControls("top"));
+$(".title-row").addEventListener("pointerdown", () => revealPreviewControls("bottom"));
 $("#filter").oninput = renderItems;
 $("#favorites").onclick = () => { showFavorites = !showFavorites; setTab(view.tab); };
 $("#loop").onclick = () => send("loop", Number(!loops.has(view.tab)), view.tab);
@@ -598,3 +927,16 @@ document.querySelectorAll("[data-loop]").forEach((node) => {
 });
 
 refreshModel().catch((error) => reportError(error.message));
+
+window.setWallpaperVisible = (visible) => {
+  wallpaperVisible = visible;
+  if (!visible) stopVoice();
+  window.sceneLayers?.setVisible(visible);
+};
+window.wallpaperTap = (x, y) => {
+  const clientX = x * innerWidth, clientY = y * innerHeight;
+  const target = document.elementFromPoint(clientX, clientY);
+  if (target?.closest("#pet-menu, #pet-menu-button")) target.closest("button")?.click();
+  else if (target?.closest("#canvas")) avatarClick({clientX, clientY});
+};
+window.addEventListener("scene-editor-change", updateControlsVisibility);

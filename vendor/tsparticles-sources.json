@@ -1,0 +1,16 @@
+[
+  {
+    "file": "tsparticles.engine.min.js",
+    "version": "3.9.1",
+    "url": "https://cdn.jsdelivr.net/npm/@tsparticles/engine@3.9.1/tsparticles.engine.min.js",
+    "sha256": "485199cd0f9e0e8566747bdd505b351cd9f91d4c0afebd0ac12a426eb1177b6a",
+    "license": "MIT"
+  },
+  {
+    "file": "tsparticles.slim.bundle.min.js",
+    "version": "3.9.1",
+    "url": "https://cdn.jsdelivr.net/npm/@tsparticles/slim@3.9.1/tsparticles.slim.bundle.min.js",
+    "sha256": "6ae8e059cdc703997eb8432493660523604cc95093ee400abff03f5cc52bee95",
+    "license": "MIT"
+  }
+]

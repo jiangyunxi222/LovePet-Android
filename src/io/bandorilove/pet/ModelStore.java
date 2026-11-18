@@ -43,9 +43,99 @@ final class ModelStore {
 
     File active() {
         String name = prefs.getString("active", "");
-        if (!name.matches("[0-9a-f-]{36}")) return null;
-        File folder = new File(models, name);
-        return new File(folder, "session.json").isFile() ? folder : null;
+        File folder = savedFolder(name);
+        return folder != null && new File(folder, "session.json").isFile() ? folder : null;
+    }
+
+    private File savedFolder(String id) {
+        return id.matches("[0-9a-f-]{36}") ? new File(models, id) : null;
+    }
+
+    private JSONObject savedSession(File folder) throws Exception {
+        try (InputStream input = new FileInputStream(new File(folder, "session.json"))) {
+            return new JSONObject(new String(readBytes(input, JSON_LIMIT), StandardCharsets.UTF_8));
+        }
+    }
+
+    private JSONObject historyItem(File folder, JSONObject session, Uri source, String sourceName) throws Exception {
+        return new JSONObject().put("id", folder.getName()).put("name", session.getJSONObject("catalog").getString("name"))
+                .put("source", source == null ? "" : source.toString()).put("sourceName", sourceName)
+                .put("added", System.currentTimeMillis());
+    }
+
+    private void rememberCurrentModel() throws Exception {
+        File folder = active();
+        if (folder == null || prefs.contains("saved:" + folder.getName())) return;
+        JSONObject item = historyItem(folder, savedSession(folder), null, "");
+        if (!prefs.edit().putString("saved:" + folder.getName(), item.toString()).commit()) {
+            throw new IOException("无法保存模型记录");
+        }
+    }
+
+    synchronized JSONArray history() throws IOException {
+        try {
+            rememberCurrentModel();
+            String activeId = prefs.getString("active", "");
+            List<JSONObject> items = new ArrayList<>();
+            for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+                if (!entry.getKey().startsWith("saved:") || !(entry.getValue() instanceof String)) continue;
+                JSONObject item = new JSONObject((String) entry.getValue());
+                File folder = savedFolder(item.getString("id"));
+                item.put("available", folder != null && new File(folder, "session.json").isFile());
+                item.put("active", activeId.equals(item.getString("id")));
+                item.remove("source");
+                items.add(item);
+            }
+            items.sort(Comparator.comparingLong((JSONObject item) -> item.optLong("added")).reversed());
+            return new JSONArray(items);
+        } catch (Exception error) {
+            throw new IOException("无法读取模型记录", error);
+        }
+    }
+
+    synchronized void useSaved(String id, int costume) throws IOException {
+        File folder = savedFolder(id);
+        if (folder == null || (!prefs.contains("saved:" + id) && !id.equals(prefs.getString("active", "")))) {
+            throw new IOException("模型记录已失效，请重新导入。");
+        }
+        JSONObject catalog;
+        try {
+            catalog = savedSession(folder).getJSONObject("catalog");
+            JSONArray costumes = catalog.getJSONArray("costumes");
+            for (int i = 0; i < costumes.length(); i++) {
+                JSONObject item = costumes.getJSONObject(i);
+                String path = safe(item.getString("file"));
+                try (InputStream input = new FileInputStream(new File(folder, path))) {
+                    JSONObject model = new JSONObject(new String(readBytes(input, JSON_LIMIT), StandardCharsets.UTF_8));
+                    boolean modern = item.getBoolean("cubism3");
+                    JSONObject refs = modern ? model.getJSONObject("FileReferences") : model;
+                    checkSavedAsset(folder, path, refs.getString(modern ? "Moc" : "model"));
+                    JSONArray textures = refs.getJSONArray(modern ? "Textures" : "textures");
+                    for (int t = 0; t < textures.length(); t++) checkSavedAsset(folder, path, textures.getString(t));
+                    if (runtime(modern ? CORE3 : CORE2) == null) throw new IOException("运行库丢失");
+                }
+            }
+        } catch (Exception error) {
+            throw new IOException("模型资源已失效，请重新导入。", error);
+        }
+        if (!prefs.edit().putString("active", id).commit()) throw new IOException("无法切换模型");
+        if (costume >= 0 && catalog.has("id")) context.getSharedPreferences("player", Context.MODE_PRIVATE)
+                .edit().putInt("costume:" + catalog.optString("id"), costume).apply();
+    }
+
+    private static void checkSavedAsset(File folder, String modelPath, String reference) throws IOException {
+        String path = relative(reference);
+        if (modelPath.startsWith("plain/") && !path.startsWith("plain/")) path = "plain/" + path;
+        if (!new File(folder, path).isFile()) throw new IOException("模型文件丢失");
+    }
+
+    synchronized void removeSaved(String id) throws IOException {
+        File folder = savedFolder(id);
+        if (folder == null) throw new IOException("模型记录无效");
+        android.content.SharedPreferences.Editor edit = prefs.edit().remove("saved:" + id);
+        if (id.equals(prefs.getString("active", ""))) edit.remove("active");
+        if (!edit.commit()) throw new IOException("无法删除模型记录");
+        delete(folder);
     }
 
     File runtime(String name) {
@@ -86,7 +176,7 @@ final class ModelStore {
     }
 
     synchronized void importModel(Uri uri, String entry) throws Exception {
-        File previous = active();
+        rememberCurrentModel();
         File staged = new File(models, UUID.randomUUID().toString());
         mkdir(staged);
         boolean installed = false;
@@ -128,13 +218,15 @@ final class ModelStore {
             requireRuntime(session);
             session.put("version", staged.getName());
             writeJson(new File(staged, "session.json"), session);
-            if (!prefs.edit().putString("active", staged.getName()).commit()) {
+            String sourceName = entry != null ? entry : documentName(uri);
+            JSONObject item = historyItem(staged, session, uri, sourceName);
+            if (!prefs.edit().putString("active", staged.getName())
+                    .putString("saved:" + staged.getName(), item.toString()).commit()) {
                 throw new IOException("无法保存当前模型");
             }
             installed = true;
         } finally {
-            if (installed) delete(previous);
-            else delete(staged);
+            if (!installed) delete(staged);
         }
     }
 

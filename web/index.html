@@ -7,11 +7,16 @@
   <link rel="icon" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
   <script defer src="/app.js"></script>
+  <script defer src="/scene.js"></script>
+  <script defer src="/library.js"></script>
 </head>
 <body>
   <header id="toolbar">
     <div class="brand"><img src="/favicon.svg" alt=""><span>BandoriLovePet</span></div>
-    <button id="replace" hidden>更换模型</button>
+    <div class="toolbar-actions">
+      <button id="replace" hidden>更换模型</button>
+      <button id="placement" aria-haspopup="dialog" aria-controls="settings">设置</button>
+    </div>
   </header>
   <main>
     <section id="welcome" hidden>
@@ -20,15 +25,18 @@
         <h1>导入模型</h1>
         <p>ZIP 仅支持 BandoriLove 单角色发行包。第三方模型请选择 LPK 或 WPK。</p>
         <button class="primary" id="choose">选择模型</button>
+        <button id="welcome-models">已导入的模型</button>
+        <button id="welcome-wallpaper" hidden>退出壁纸</button>
       </div>
     </section>
     <p id="status" role="status" hidden></p>
     <section id="player" hidden>
       <div class="title-row">
         <div><p id="source"></p><h1 id="name"></h1></div>
-        <button id="toggle" class="primary" disabled>显示桌宠</button>
+        <div class="pet-actions"><button id="toggle" class="primary" disabled>显示桌宠</button><button id="apply-wallpaper" disabled>显示壁纸</button></div>
       </div>
       <div id="stage">
+        <div id="scene-layers" aria-hidden="true"></div>
         <div id="canvas" aria-label="Live2D 模型预览"></div>
         <p id="loading" role="status" hidden>正在加载模型…</p>
         <p id="caption" hidden></p>
@@ -51,8 +59,159 @@
       </section>
     </section>
   </main>
+  <dialog id="settings" aria-labelledby="settings-title">
+    <header class="settings-heading">
+      <img src="/favicon.svg" alt="">
+      <h2 id="settings-title">设置</h2>
+      <button id="settings-close" aria-label="关闭设置" autofocus>×</button>
+    </header>
+    <div class="settings-content">
+      <button id="edit-scene" class="scene-entry"><span>壁纸设置</span><small>背景 · 角色 · 特效</small><span aria-hidden="true">›</span></button>
+      <button id="open-permissions" class="scene-entry" aria-haspopup="dialog"><span>权限配置</span><small>桌宠 · 通知 · 壁纸</small><span aria-hidden="true">›</span></button>
+      <fieldset class="placement-options">
+        <legend>桌宠显示位置</legend>
+        <label class="placement-option">
+          <input type="radio" name="pet-placement" id="mode-top" value="top">
+          <span>浮于应用上层</span>
+        </label>
+        <label class="placement-option">
+          <input type="radio" name="pet-placement" id="mode-home" value="home">
+          <span>仅在主屏幕显示</span>
+        </label>
+      </fieldset>
+      <div id="usage-access" role="status" hidden>
+        <p>此模式需要系统的使用情况访问权限。</p>
+        <button id="grant-usage">前往授权</button>
+      </div>
+      <div class="settings-switches" id="role-settings" hidden>
+        <label class="settings-switch">
+          <span><strong>角色控制</strong><small>关闭后进入全屏纯享</small></span>
+          <input type="checkbox" id="controls-toggle" role="switch">
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label class="settings-switch">
+          <span><strong>互动仅收藏</strong><small>点角色时只播放已收藏的内容</small></span>
+          <input type="checkbox" id="favorite-interactions" role="switch">
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+      </div>
+      <div class="settings-switches">
+        <label class="settings-switch">
+          <span><strong>显示字幕卡</strong><small>预览、桌宠和动态壁纸中的语音字幕</small></span>
+          <input type="checkbox" id="caption-cards" role="switch" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="permission-config" aria-labelledby="permission-config-title">
+    <header class="settings-heading">
+      <img src="/favicon.svg" alt="">
+      <h2 id="permission-config-title">权限配置</h2>
+      <button id="close-permissions" class="dialog-close" aria-label="关闭权限配置" autofocus>×</button>
+    </header>
+    <div class="settings-content permission-list">
+      <div class="permission-row">
+        <div><strong>悬浮窗</strong><p>显示桌宠时需要允许显示在其他应用上层。</p></div>
+        <span class="permission-state" id="perm-overlay">正在检查</span>
+        <button data-permission="overlay">去设置</button>
+      </div>
+      <div class="permission-row">
+        <div><strong>使用情况访问</strong><p>桌宠选择「仅在主屏幕显示」时需要。</p></div>
+        <span class="permission-state" id="perm-usage">正在检查</span>
+        <button data-permission="usage">去设置</button>
+      </div>
+      <div class="permission-row">
+        <div><strong>通知</strong><p>用于在通知栏显示桌宠状态及退出按钮。</p></div>
+        <span class="permission-state" id="perm-notifications">正在检查</span>
+        <button data-permission="notifications">去设置</button>
+      </div>
+      <div class="permission-row">
+        <div><strong>动态壁纸</strong><p id="perm-wallpaper-detail">点「显示壁纸」后在系统页面选择主屏幕。</p></div>
+        <span class="permission-state" id="perm-wallpaper">正在检查</span>
+        <button data-permission="wallpaper">应用信息</button>
+      </div>
+      <p class="permission-note">选模型、背景素材或原壁纸时，由系统授权所选内容。</p>
+    </div>
+  </dialog>
+  <dialog id="app-prompt" aria-labelledby="app-prompt-title">
+    <header class="settings-heading">
+      <img src="/favicon.svg" alt="">
+      <h2 id="app-prompt-title"></h2>
+    </header>
+    <div class="settings-content">
+      <p id="app-prompt-message"></p>
+      <form method="dialog" class="prompt-actions">
+        <button id="app-prompt-cancel" value="cancel">取消</button>
+        <button id="app-prompt-confirm" class="primary" value="confirm" autofocus>知道了</button>
+      </form>
+    </div>
+  </dialog>
+  <dialog id="app-library" aria-labelledby="app-library-title">
+    <header class="settings-heading">
+      <img src="/favicon.svg" alt="">
+      <h2 id="app-library-title"></h2>
+      <button class="library-close" aria-label="关闭" autofocus>×</button>
+    </header>
+    <div class="settings-content">
+      <ul id="app-library-items"></ul>
+      <p id="app-library-message" role="status" hidden></p>
+      <button id="app-library-add" class="primary" hidden>导入新模型</button>
+    </div>
+  </dialog>
+  <p id="app-notice" role="status" hidden></p>
+  <section id="scene-editor" aria-label="壁纸图层编辑" hidden>
+    <header class="scene-toolbar">
+      <button id="scene-back">‹ 返回</button>
+      <h2>壁纸设置</h2>
+      <button id="scene-preview" aria-pressed="false">预览</button>
+    </header>
+    <div class="scene-sheet">
+      <div class="scene-scroll">
+      <details class="scene-section" id="scene-library-section">
+        <summary>壁纸配置</summary>
+        <div class="scene-add">
+          <button id="scene-save-preset">保存当前配置</button>
+          <button id="scene-open-presets">已保存的壁纸</button>
+        </div>
+      </details>
+      <details id="scene-stack-section" class="scene-section" open>
+      <summary>图层<span>上方图层显示在前</span></summary>
+      <p class="scene-gesture-hint">选中图层后，单指拖动 · 双指缩放</p>
+      <ol id="scene-stack"></ol>
+      </details>
+      <details id="scene-material-section" class="scene-section">
+      <summary>素材与特效<span>背景 · 图片 · 视频 · 12 种特效</span></summary>
+      <div class="scene-add">
+        <button id="scene-add-image">＋ 图片 / 视频</button>
+        <button id="scene-add-background">＋ 配色</button>
+        <button id="scene-add-effect">＋ 特效</button>
+      </div>
+      <div id="scene-choices" hidden><p id="scene-choices-title"></p><div id="scene-choice-grid"></div></div>
+      <input id="scene-file" type="file" accept="image/png,image/jpeg,image/webp,video/mp4" hidden>
+      </details>
+      <details id="scene-adjust-section" class="scene-section">
+      <summary>图层调整<span id="scene-selection-hint">角色</span></summary>
+      <fieldset id="scene-adjust">
+        <legend id="scene-selected">角色</legend>
+        <div id="scene-palette" aria-label="背景配色"></div>
+        <p id="scene-base-note" hidden>原来的角色背景固定保留在底层。添加图片、视频或配色即可覆盖，删除后自动恢复。</p>
+        <label id="scene-opacity-row">透明度<input id="scene-opacity" type="range" min="0" max="100"><output id="scene-opacity-value"></output></label>
+        <label id="scene-scale-row">大小<input id="scene-scale" type="range" min="30" max="300"><output id="scene-scale-value"></output></label>
+        <div class="scene-position">
+          <label>左右<input id="scene-x" type="range" min="-80" max="80"></label>
+          <label>上下<input id="scene-y" type="range" min="-80" max="80"></label>
+        </div>
+      </fieldset>
+      </details>
+      <p id="scene-message" role="status" hidden></p>
+      </div>
+      <button id="scene-apply" class="primary">完成并预览</button>
+    </div>
+  </section>
   <button id="pet-menu-button" aria-label="桌宠菜单" hidden>⋯</button>
   <div id="pet-menu" aria-label="桌宠菜单" hidden>
+    <button id="close-pet-menu">关闭菜单</button>
     <button id="open-panel">打开面板</button>
     <button data-loop="action">循环动作</button>
     <button data-loop="voice">循环语音</button>

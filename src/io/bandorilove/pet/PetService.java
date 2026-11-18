@@ -9,8 +9,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.PixelFormat;
+import android.graphics.Insets;
+import android.graphics.PointF;
 import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.Region;
 import android.hardware.display.DisplayManager;
+import android.os.Build;
 import android.os.IBinder;
 import android.provider.Settings;
 import android.view.*;
@@ -19,16 +24,54 @@ import android.widget.FrameLayout;
 import org.json.JSONObject;
 
 public final class PetService extends Service {
+    static final String NOTIFICATION_CHANNEL = "pet";
     private static final String STOP = "io.bandorilove.pet.STOP_PET";
+    private static final String HOME_ONLY = "homeOnly";
+    private static final int OVERLAY_FLAGS = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
     private static volatile PetService active;
     private PetWeb player;
     private WindowManager window;
     private WindowManager.LayoutParams frame;
     private Rect screen;
     private FrameLayout container;
+    private final Rect crop = new Rect();
+    private final RectF cropArea = new RectF();
+    private Region touchRegion = new Region();
+    private int canvasX, canvasY, canvasWidth, canvasHeight;
+    private int displayWidth, displayHeight;
     private SharedPreferences saved;
+    private HomeVisibility homeVisibility;
+    private boolean wantedVisible;
+    private boolean settingsOpen;
+    private volatile boolean visible;
 
     static boolean showing() { return active != null; }
+    static boolean visible() {
+        PetService current = active;
+        return current != null && current.visible;
+    }
+    static boolean homeOnly(Context context) {
+        return context.getSharedPreferences("overlay", MODE_PRIVATE).getBoolean(HOME_ONLY, false);
+    }
+    static void setHomeOnly(Context context, boolean homeOnly) {
+        context.getSharedPreferences("overlay", MODE_PRIVATE).edit().putBoolean(HOME_ONLY, homeOnly).apply();
+        PetService current = active;
+        if (current != null) current.configureVisibility(homeOnly);
+        MainActivity.petChanged();
+    }
+    static void suspendForSettings(boolean open) {
+        PetService current = active;
+        if (current != null) {
+            current.settingsOpen = open;
+            current.updateVisibility();
+        }
+    }
+    static void updatePreviewVisibility() {
+        PetService current = active;
+        if (current != null) current.updateVisibility();
+    }
 
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         if (intent == null || STOP.equals(intent.getAction()) || !Settings.canDrawOverlays(this)) {
@@ -48,10 +91,10 @@ public final class PetService extends Service {
 
     private Notification notification() {
         NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(new NotificationChannel("pet", "BandoriLovePet", NotificationManager.IMPORTANCE_LOW));
+        manager.createNotificationChannel(new NotificationChannel(NOTIFICATION_CHANNEL, "BandoriLovePet", NotificationManager.IMPORTANCE_LOW));
         PendingIntent panel = PendingIntent.getActivity(this, 1, panelIntent(), PendingIntent.FLAG_IMMUTABLE);
         PendingIntent stop = PendingIntent.getService(this, 2, new Intent(this, PetService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE);
-        return new Notification.Builder(this, "pet").setContentTitle("BandoriLovePet")
+        return new Notification.Builder(this, NOTIFICATION_CHANNEL).setContentTitle("BandoriLovePet")
                 .setContentText("拖动角色移动，双指缩放")
                 .setSmallIcon(R.drawable.pet_icon).setContentIntent(panel).setOngoing(true)
                 .addAction(new Notification.Action.Builder(null, "退出桌宠", stop).build()).build();
@@ -67,22 +110,120 @@ public final class PetService extends Service {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
         window = overlay.getSystemService(WindowManager.class);
         saved = getSharedPreferences("overlay", MODE_PRIVATE);
-        int width = saved.getInt("width", dp(190));
-        frame = new WindowManager.LayoutParams(width, Math.round(width * 1.45f),
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                PixelFormat.TRANSLUCENT);
-        frame.gravity = Gravity.TOP | Gravity.LEFT;
-        screen = window.getCurrentWindowMetrics().getBounds();
-        frame.x = saved.getInt("x", screen.width() - frame.width);
-        frame.y = saved.getInt("y", screen.height() - frame.height - dp(80));
-        place(frame.x, frame.y, width);
-        player = new PetWeb(overlay, true, () -> {}, this::stopSelf, () -> startActivity(panelIntent()), this::stopSelf);
+        readScreenBounds();
+        frame = overlayFrame();
+        int width = limitWidth(saved.getInt("width", dp(190)));
+        player = new PetWeb(overlay, true, () -> {}, this::stopSelf, () -> startActivity(panelIntent()),
+                ignored -> {}, ignored -> {}, ignored -> {}, this::stopSelf);
+        place(saved.getInt("x", screen.right - width),
+                saved.getInt("y", screen.bottom - heightForWidth(width) - dp(60)), width);
         container = new DragFrame(overlay);
-        container.addView(player.view(), new FrameLayout.LayoutParams(-1, -1));
+        container.addView(player.view(), new FrameLayout.LayoutParams(canvasWidth, canvasHeight));
+        container.setVisibility(View.INVISIBLE);
+        container.addOnLayoutChangeListener((v, l, t, r, b, previousL, previousT, previousR, previousB) -> pushTouchRegion());
+        player.onTouchShapeChanged(this::updateWindowCrop);
         window.addView(container, frame);
+        updateWindowCrop();
         active = this;
+        configureVisibility(homeOnly(this));
         player.load();
+        MainActivity.petChanged();
+    }
+
+    private WindowManager.LayoutParams overlayFrame() {
+        WindowManager.LayoutParams layout = new WindowManager.LayoutParams(1, 1,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, OVERLAY_FLAGS, PixelFormat.TRANSLUCENT);
+        layout.gravity = Gravity.TOP | Gravity.LEFT;
+        layout.setFitInsetsTypes(0);
+        layout.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        return layout;
+    }
+
+    private void readScreenBounds() {
+        WindowMetrics metrics = window.getCurrentWindowMetrics();
+        Insets insets = metrics.getWindowInsets().getInsetsIgnoringVisibility(
+                WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+        Rect bounds = metrics.getBounds();
+        displayWidth = bounds.width();
+        displayHeight = bounds.height();
+        screen = new Rect(insets.left, insets.top, displayWidth - insets.right, displayHeight - insets.bottom);
+    }
+
+    private int limitWidth(int width) {
+        return Math.min(displayWidth, Math.max(dp(96), width));
+    }
+
+    private int heightForWidth(int width) {
+        return Math.round(width * (displayHeight / (float) displayWidth));
+    }
+
+    private void updateWindowCrop() {
+        if (container == null || !container.isAttachedToWindow()) return;
+        PetTouchShape shape = player.touchShape();
+        touchRegion = shape.modelRegion(canvasWidth, canvasHeight, dp(2));
+        Rect model = touchRegion.getBounds();
+        if (!model.isEmpty()) {
+            RectF visible = new RectF(model.left / (float) canvasWidth, model.top / (float) canvasHeight,
+                    model.right / (float) canvasWidth, model.bottom / (float) canvasHeight);
+            // Keep the opaque window steady as the silhouette changes between frames.
+            // Expand only when a pose exceeds the space already reserved.
+            if (!cropArea.contains(visible)) {
+                visible.inset(-.045f, -.045f);
+                visible.union(.15f, .06f, .85f, .94f);
+                visible.intersect(0, 0, 1, 1);
+                cropArea.union(visible);
+                player.desktopCrop(cropArea);
+            }
+        }
+        shape.addControls(touchRegion, canvasWidth, canvasHeight);
+        if (cropArea.isEmpty()) crop.set(0, 0, 1, 1);
+        else crop.set(Math.round(cropArea.left * canvasWidth), Math.round(cropArea.top * canvasHeight),
+                Math.round(cropArea.right * canvasWidth), Math.round(cropArea.bottom * canvasHeight));
+        touchRegion.op(crop, Region.Op.INTERSECT);
+        player.view().setTranslationX(-crop.left);
+        player.view().setTranslationY(-crop.top);
+        int x = canvasX + crop.left, y = canvasY + crop.top;
+        if (frame.x != x || frame.y != y || frame.width != crop.width() || frame.height != crop.height()) {
+            frame.x = x;
+            frame.y = y;
+            frame.width = crop.width();
+            frame.height = crop.height();
+            window.updateViewLayout(container, frame);
+        }
+        pushTouchRegion();
+    }
+
+    private void pushTouchRegion() {
+        if (Build.VERSION.SDK_INT < 33) return;
+        AttachedSurfaceControl surface = container.getRootSurfaceControl();
+        if (surface != null) {
+            Region local = new Region(touchRegion);
+            local.translate(-crop.left, -crop.top);
+            surface.setTouchableRegion(local);
+        }
+    }
+
+    private void configureVisibility(boolean homeOnly) {
+        if (homeVisibility != null) {
+            homeVisibility.close();
+            homeVisibility = null;
+        }
+        setVisible(!homeOnly);
+        if (homeOnly) homeVisibility = new HomeVisibility(this, this::setVisible);
+    }
+
+    private void setVisible(boolean show) {
+        wantedVisible = show;
+        updateVisibility();
+    }
+
+    private void updateVisibility() {
+        boolean show = wantedVisible && !settingsOpen && !MainActivity.showingImmersivePreview();
+        if (visible == show) return;
+        visible = show;
+        container.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
+        updateWindowCrop();
+        player.status();
         MainActivity.petChanged();
     }
 
@@ -91,31 +232,46 @@ public final class PetService extends Service {
     }
 
     private void place(int x, int y, int width) {
-        int height = Math.round(width * 1.45f);
-        int margin = dp(42);
-        x = Math.max(margin - width, Math.min(screen.width() - margin, x));
-        y = Math.max(margin - height, Math.min(screen.height() - margin, y));
-        if (frame.x == x && frame.y == y && frame.width == width && frame.height == height) return;
-        frame.x = x;
-        frame.y = y;
-        frame.width = width;
-        frame.height = height;
-        if (container != null && container.isAttachedToWindow()) window.updateViewLayout(container, frame);
+        width = limitWidth(width);
+        int height = heightForWidth(width);
+        PointF grip = player.touchShape().grip();
+        int anchorX = Math.round(width * (grip == null ? .5f : grip.x));
+        int anchorY = Math.round(height * (grip == null ? .54f : grip.y));
+        int marginX = Math.min(dp(24), screen.width() / 2);
+        int marginY = Math.min(dp(24), screen.height() / 2);
+        x = Math.max(screen.left + marginX - anchorX, Math.min(screen.right - marginX - anchorX, x));
+        y = Math.max(screen.top + marginY - anchorY, Math.min(screen.bottom - marginY - anchorY, y));
+        boolean resized = canvasWidth != width || canvasHeight != height;
+        if (!resized && canvasX == x && canvasY == y) return;
+        canvasX = x;
+        canvasY = y;
+        canvasWidth = width;
+        canvasHeight = height;
+        if (container != null) {
+            if (resized) {
+                android.view.ViewGroup.LayoutParams size = player.view().getLayoutParams();
+                size.width = width;
+                size.height = height;
+                player.view().setLayoutParams(size);
+            }
+            updateWindowCrop();
+        }
     }
 
     @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
         super.onConfigurationChanged(configuration);
         if (frame != null) {
-            screen = window.getCurrentWindowMetrics().getBounds();
-            place(frame.x, frame.y, frame.width);
+            readScreenBounds();
+            place(canvasX, canvasY, canvasWidth);
         }
     }
 
     @Override public void onDestroy() {
         if (active == this) active = null;
+        if (homeVisibility != null) homeVisibility.close();
         if (container != null && container.isAttachedToWindow()) window.removeViewImmediate(container);
         if (player != null) {
-            container.removeView(player.view());
+            if (container != null) container.removeView(player.view());
             player.destroy();
         }
         stopForeground(STOP_FOREGROUND_REMOVE);
@@ -127,12 +283,17 @@ public final class PetService extends Service {
 
     static void receive(JSONObject command) {
         PetService current = active;
-        if (current != null) current.player.receive(command, true);
+        if (current != null) current.player.receive(command, current.visible);
     }
 
     static void refresh() {
         PetService current = active;
         if (current != null) current.player.refresh();
+    }
+
+    static void updateCaptions(boolean enabled) {
+        PetService current = active;
+        if (current != null && current.player != null) current.player.updateCaptionCards(enabled);
     }
 
     private final class DragFrame extends FrameLayout {
@@ -144,7 +305,7 @@ public final class PetService extends Service {
         private int windowY;
         private boolean dragging;
         private boolean pinching;
-        private boolean captionGesture;
+        private boolean controlsGesture;
         private int firstFinger;
         private int secondFinger;
         private float initialSpan;
@@ -183,9 +344,9 @@ public final class PetService extends Service {
             float x = event.getRawX(0), y = event.getRawY(0);
             float otherX = event.getRawX(event.getActionIndex()), otherY = event.getRawY(event.getActionIndex());
             initialSpan = Math.max(1, (float) Math.hypot(x - otherX, y - otherY));
-            initialWidth = frame.width;
-            anchorX = ((x + otherX) / 2 - frame.x) / frame.width;
-            anchorY = ((y + otherY) / 2 - frame.y) / frame.height;
+            initialWidth = canvasWidth;
+            anchorX = ((x + otherX) / 2 - canvasX) / canvasWidth;
+            anchorY = ((y + otherY) / 2 - canvasY) / canvasHeight;
         }
 
         private void movePinch(MotionEvent event) {
@@ -195,8 +356,8 @@ public final class PetService extends Service {
             float x = event.getRawX(first), y = event.getRawY(first);
             float otherX = event.getRawX(second), otherY = event.getRawY(second);
             float span = (float) Math.hypot(x - otherX, y - otherY);
-            int width = Math.max(dp(96), Math.min(dp(380), Math.round(initialWidth * span / initialSpan)));
-            int height = Math.round(width * 1.45f);
+            int width = limitWidth(Math.round(initialWidth * span / initialSpan));
+            int height = heightForWidth(width);
             queueFrame(Math.round((x + otherX) / 2 - anchorX * width),
                     Math.round((y + otherY) / 2 - anchorY * height), width);
         }
@@ -204,15 +365,15 @@ public final class PetService extends Service {
         @Override public boolean dispatchTouchEvent(MotionEvent event) {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
-                captionGesture = player.hitsCaption(event.getX(), event.getY());
+                controlsGesture = player.hitsControls(event.getX() + crop.left, event.getY() + crop.top);
                 dragging = pinching = false;
                 startX = event.getRawX();
                 startY = event.getRawY();
-                windowX = frame.x;
-                windowY = frame.y;
+                windowX = canvasX;
+                windowY = canvasY;
             }
-            if (captionGesture) {
-                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) captionGesture = false;
+            if (controlsGesture) {
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) controlsGesture = false;
                 return super.dispatchTouchEvent(event);
             }
             if (action == MotionEvent.ACTION_POINTER_DOWN && !pinching) {
@@ -230,14 +391,14 @@ public final class PetService extends Service {
                     cancelChild(event);
                     dragging = true;
                 }
-                if (dragging) queueFrame(windowX + Math.round(dx), windowY + Math.round(dy), frame.width);
+                if (dragging) queueFrame(windowX + Math.round(dx), windowY + Math.round(dy), canvasWidth);
             }
             if (!dragging && !pinching) return super.dispatchTouchEvent(event);
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 removeCallbacks(drawFrame);
                 applyFrame();
                 if (pinching) player.pinching(false);
-                saved.edit().putInt("x", frame.x).putInt("y", frame.y).putInt("width", frame.width).apply();
+                saved.edit().putInt("x", canvasX).putInt("y", canvasY).putInt("width", canvasWidth).apply();
             }
             return true;
         }
