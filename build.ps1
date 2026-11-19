@@ -2,6 +2,7 @@ param(
     [string]$Sdk = $env:ANDROID_HOME,
     [string]$Jdk = $env:JAVA_HOME,
     [string]$ReleaseKeystore,
+    [string]$SigningLineage,
     [string]$SigningAlias = 'bandorilovepet'
 )
 $ErrorActionPreference = 'Stop'
@@ -9,10 +10,11 @@ $PSNativeCommandUseErrorActionPreference = $true
 if (!$Sdk -or !$Jdk) { throw 'Set ANDROID_HOME and JAVA_HOME, or pass -Sdk and -Jdk.' }
 $release = [bool]$ReleaseKeystore
 if ($release) {
-    if (!$env:BANDORILOVEPET_ANDROID_KEYSTORE_PASS) {
-        throw 'Release builds require BANDORILOVEPET_ANDROID_KEYSTORE_PASS.'
+    if (!$SigningLineage -or !$env:BANDORILOVEPET_ANDROID_KEYSTORE_PASS) {
+        throw 'Release builds require the signing lineage and BANDORILOVEPET_ANDROID_KEYSTORE_PASS.'
     }
     $ReleaseKeystore = (Resolve-Path -LiteralPath $ReleaseKeystore).Path
+    $SigningLineage = (Resolve-Path -LiteralPath $SigningLineage).Path
 }
 $api = Join-Path $Sdk 'platforms/android-35/android.jar'
 $tools = Join-Path $Sdk 'build-tools/35.0.0'
@@ -41,7 +43,7 @@ $debugLink = if (!$release) { @('--debug-mode') } else { @() }
 $env:JAVA_HOME = $Jdk
 $env:PATH = (Join-Path $Jdk 'bin') + [IO.Path]::PathSeparator + $env:PATH
 & (Join-Path $tools 'aapt2.exe') compile --dir (Join-Path $PSScriptRoot 'res') -o $compiled
-& (Join-Path $tools 'aapt2.exe') link -I $api --manifest (Join-Path $PSScriptRoot 'AndroidManifest.xml') @debugLink --version-code 1 --version-name $versionName --java $work -A $assets -0 js -o $unsigned $compiled
+& (Join-Path $tools 'aapt2.exe') link -I $api --manifest (Join-Path $PSScriptRoot 'AndroidManifest.xml') @debugLink --version-code 2 --version-name $versionName --java $work -A $assets -0 js -o $unsigned $compiled
 $javaSources = @(Get-ChildItem -LiteralPath $source -Recurse -Filter '*.java' | ForEach-Object FullName)
 $javaSources += Join-Path $work 'io/bandorilove/lovepet/R.java'
 & (Join-Path $Jdk 'bin/javac.exe') --release 11 -encoding UTF-8 -cp $api -d $classes @javaSources
@@ -52,7 +54,7 @@ try { & (Join-Path $Jdk 'bin/jar.exe') uf $unsigned classes.dex } finally { Pop-
 & (Join-Path $tools 'zipalign.exe') -f 4 $unsigned $aligned
 $signer = Join-Path $tools 'apksigner.bat'
 if ($release) {
-    & $signer sign --ks $ReleaseKeystore --ks-key-alias $SigningAlias --ks-pass env:BANDORILOVEPET_ANDROID_KEYSTORE_PASS --key-pass env:BANDORILOVEPET_ANDROID_KEYSTORE_PASS --v4-signing-enabled false --out $output $aligned
+    & $signer sign --ks $ReleaseKeystore --ks-key-alias $SigningAlias --ks-pass env:BANDORILOVEPET_ANDROID_KEYSTORE_PASS --key-pass env:BANDORILOVEPET_ANDROID_KEYSTORE_PASS --lineage $SigningLineage --rotation-min-sdk-version 28 --v1-signing-enabled false --v2-signing-enabled false --v3-signing-enabled true --v4-signing-enabled false --out $output $aligned
 } else {
     $key = Join-Path $work 'debug.keystore'
     if (!(Test-Path -LiteralPath $key)) {

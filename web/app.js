@@ -136,16 +136,10 @@ window.setPermissionStatus = (overlay, usage, notifications, wallpaperMode) => {
   for (const [id, granted] of [["overlay", overlay], ["usage", usage], ["notifications", notifications]]) {
     const status = $("#perm-" + id);
     status.dataset.status = granted ? "allowed" : "off";
-    status.textContent = granted ? "已允许" : "未允许";
+    status.textContent = granted ? "已开启" : "未开启";
   }
-  const messages = {
-    system: ["系统确认", "点首页的「壁纸」后选择主屏幕。如果确认后没有切换，请在应用信息中检查是否有「动态壁纸服务」权限。"],
-    unsupported: ["系统不支持", "当前设备或用户配置不支持设置壁纸。"],
-    restricted: ["系统限制", "当前用户或工作资料的系统策略限制了壁纸设置。"],
-  };
-  const [status, detail] = messages[wallpaperMode] || messages.system;
-  $("#perm-wallpaper").textContent = status;
-  $("#perm-wallpaper-detail").textContent = detail;
+  const wallpaperState = { system: "系统授权", unsupported: "不支持", restricted: "受限" };
+  $("#perm-wallpaper").textContent = wallpaperState[wallpaperMode] || wallpaperState.system;
 };
 
 function updateControlsVisibility() {

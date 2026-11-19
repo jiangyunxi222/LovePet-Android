@@ -34,12 +34,12 @@ adb install -r android/dist/BandoriLovePet-debug.apk
 
 ### 正式 APK
 
-用正式密钥构建，口令通过环境变量 `BANDORILOVEPET_ANDROID_KEYSTORE_PASS` 注入。正式包关闭应用与 WebView 调试。
+用正式密钥和签名轮换证明构建，口令通过环境变量 `BANDORILOVEPET_ANDROID_KEYSTORE_PASS` 注入。正式包关闭应用与 WebView 调试。
 
 ```powershell
-pwsh -File android/build.ps1 -ReleaseKeystore 'D:\signing\release.p12'
+pwsh -File android/build.ps1 -ReleaseKeystore 'D:\signing\release.p12' -SigningLineage 'D:\signing\lineage.bin'
 ```
 
-正式包输出到 `android/dist/BandoriLovePet.apk`。1.0.0 使用新的应用 ID `io.bandorilove.lovepet`，可与旧版独立安装。首次启动后在新版重新导入所需模型。后续正式包沿用这把签名密钥，并递增内部版本号。
+正式包输出到 `android/dist/BandoriLovePet.apk`。1.0.0 的应用 ID 为 `io.bandorilove.lovepet`，可与使用旧应用 ID 的版本独立安装。后续正式包沿用当前密钥和签名轮换证明，并递增内部版本号。
 
 tsParticles 使用 MIT 许可证，完整声明位于 `android/vendor/tsparticles-LICENSE.txt`，依赖来源与校验值位于 `android/vendor/tsparticles-sources.json`，均随 APK 一并打包。

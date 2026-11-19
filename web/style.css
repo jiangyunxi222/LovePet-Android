@@ -105,11 +105,10 @@ nav button[aria-pressed="true"]:not(.primary) { background: #fff; border-color: 
 }
 .performance-option-list button[aria-pressed="true"]::after { content: "✓"; flex: 0 0 auto; color: var(--rose); }
 .permission-list { display: grid; gap: 8px; }
-.permission-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: start; gap: 8px;
+.permission-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 8px;
   padding: 11px 12px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
 .permission-row strong { font-size: 14px; }
-.permission-row p, .permission-note { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.permission-row button { grid-column: 1 / -1; justify-self: end; min-height: 36px; padding: 0 12px; font-size: 12px; }
+.permission-row button { min-height: 36px; padding: 0 12px; font-size: 12px; }
 .permission-state { border-radius: 999px; background: var(--pink); color: #753756; padding: 3px 8px; font-size: 11px; white-space: nowrap; }
 .permission-state[data-status="allowed"] { background: #e9f2e9; color: #385b45; }
 #app-prompt-message { line-height: 1.65; white-space: pre-line; overflow-wrap: anywhere; }

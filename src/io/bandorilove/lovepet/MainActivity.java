@@ -55,8 +55,7 @@ public final class MainActivity extends Activity {
     private static final int WALLPAPER_RESTORE = 10;
     private static final int WALLPAPER_RESTORE_SETTINGS = 11;
     private static final int WALLPAPER_BACKUP = 12;
-    private static final String WALLPAPER_PERMISSION_HINT =
-            "如果应用信息的「权限」或「其他权限」里有「动态壁纸服务」，请允许后重试。";
+    private static final String WALLPAPER_PERMISSION_HINT = "若有「动态壁纸服务」权限，请开启。";
     private static final String SYSTEM_PHOTO_PICKER = "androidx.activity.result.contract.action.PICK_IMAGES";
     private ValueCallback<Uri[]> scenePicker;
     private static WeakReference<MainActivity> active = new WeakReference<>(null);
@@ -332,7 +331,7 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> finishImport(null));
             } catch (ViewerPackage.WorkshopConfigRequired error) {
                 if (selected == null) {
-                    runOnUiThread(() -> requestFolder(uri, "这个 LPK 需要读取同目录的 config.json。"));
+                    runOnUiThread(() -> requestFolder(uri, "请选择 LPK 所在目录。"));
                 } else runOnUiThread(() -> finishImport(error));
             } catch (Exception error) {
                 runOnUiThread(() -> finishImport(error));
@@ -421,9 +420,9 @@ public final class MainActivity extends Activity {
             stopService(new Intent(this, PetService.class));
         } else if (!importing && store.active() != null) {
             if (Settings.canDrawOverlays(this)) launchPet();
-            else player.prompt("桌宠权限", "显示桌宠需要允许 BandoriLovePet 显示在其他应用上层。", "前往设置", () -> {
+            else player.prompt("悬浮窗权限", "请允许在其他应用上层显示。", "去设置", () -> {
                 Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));
-                if (!launchPicker(intent, OVERLAY)) player.notice("系统未提供悬浮窗权限设置");
+                if (!launchPicker(intent, OVERLAY)) player.notice("无法打开悬浮窗设置");
             });
         }
     }
@@ -437,7 +436,7 @@ public final class MainActivity extends Activity {
             startActivityForResult(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS), USAGE_ACCESS);
             awaitingUsageAccess = true;
         } catch (ActivityNotFoundException | SecurityException error) {
-            player.prompt("使用情况访问", "系统未提供使用情况访问设置。", null, null);
+            player.prompt("使用情况访问", "无法打开系统授权页。", null, null);
         }
     }
 
@@ -476,18 +475,18 @@ public final class MainActivity extends Activity {
         }
         if (store.active() == null) {
             updateWallpaperStatus();
-            wallpaperMessage("请先导入模型，再应用壁纸。");
+            wallpaperMessage("请先导入模型。");
             return;
         }
         WallpaperManager manager = WallpaperManager.getInstance(this);
         if (!manager.isWallpaperSupported()) {
             updateWallpaperStatus();
-            wallpaperMessage("当前设备或用户配置不支持设置壁纸。");
+            wallpaperMessage("系统不支持动态壁纸。");
             return;
         }
         if (!manager.isSetWallpaperAllowed()) {
             updateWallpaperStatus();
-            wallpaperMessage("当前用户或工作资料的系统策略限制了壁纸设置。");
+            wallpaperMessage("系统限制更换壁纸。");
             return;
         }
         int currentId = manager.getWallpaperId(WallpaperManager.FLAG_SYSTEM);
@@ -497,7 +496,7 @@ public final class MainActivity extends Activity {
             showWallpaper();
         } else {
             updateWallpaperStatus();
-            player.prompt("保留原壁纸", "请从相册选一次你当前的主屏幕壁纸原图。退出 BandoriLovePet 壁纸时，会用这张图恢复。",
+            player.prompt("保留原壁纸", "选择原图，退出时恢复。",
                     "选择原壁纸", () -> chooseWallpaperPhoto(false));
         }
     }
@@ -518,7 +517,7 @@ public final class MainActivity extends Activity {
                 .addCategory(Intent.CATEGORY_OPENABLE), WALLPAPER_BACKUP)) return;
         choosingWallpaperBackup = externalPicker = false;
         setSettingsVisible(settingsVisible);
-        wallpaperMessage("无法打开相册来选择原壁纸。");
+        wallpaperMessage("无法打开相册。");
     }
 
     private void rememberWallpaperPhoto(Uri uri) {
@@ -536,7 +535,7 @@ public final class MainActivity extends Activity {
                     else {
                         wallpaperChanging = false;
                         updateWallpaperStatus();
-                        wallpaperMessage("选择图片期间主屏幕壁纸已更改。请重新选择当前使用的壁纸。");
+                        wallpaperMessage("原壁纸已更换，请重新选择。");
                     }
                 });
             } catch (IOException | SecurityException error) {
@@ -544,7 +543,7 @@ public final class MainActivity extends Activity {
                     if (isDestroyed()) return;
                     wallpaperChanging = false;
                     updateWallpaperStatus();
-                    wallpaperMessage("无法保存原壁纸图片。请选择一张可读取、大小不超过 64 MB 的图片。");
+                    wallpaperMessage("保存失败，请选择 64 MB 以内的图片。");
                 });
             }
         });
@@ -611,7 +610,7 @@ public final class MainActivity extends Activity {
         }
         if (openSettingsScreen(screen) || (screen != appInfo && openSettingsScreen(appInfo))) return;
         if (player != null) {
-            player.prompt("权限配置", "无法自动打开权限页。请在系统设置中找到 BandoriLovePet 的应用信息。", null, null);
+            player.prompt("权限配置", "请在系统设置中授权。", null, null);
         }
     }
 
@@ -625,25 +624,17 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void offerWallpaperList(String reason) {
-        if (player == null) return;
-        player.prompt("显示壁纸", reason + "\n" + WALLPAPER_PERMISSION_HINT
-                + "\n也可从系统动态壁纸列表选择 BandoriLovePet，再选「主屏幕」。",
-                "打开壁纸列表", this::openWallpaperList);
-    }
-
     private void openWallpaperList() {
         if (!launchWallpaperPicker(new Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER), WALLPAPER_LIST)) {
-            offerWallpaperSettings("系统没有提供独立的动态壁纸列表。");
+            offerWallpaperSettings();
         }
     }
 
-    private void offerWallpaperSettings(String reason) {
+    private void offerWallpaperSettings() {
         if (player == null) return;
-        player.prompt("壁纸未切换", reason + "\n请在系统壁纸设置中找到 BandoriLovePet，再设为主屏幕壁纸。",
-                "打开系统壁纸设置", () -> {
+        player.prompt("设置主屏幕壁纸", "请选择 BandoriLovePet。", "去设置", () -> {
                     if (!launchWallpaperPicker(new Intent(Intent.ACTION_SET_WALLPAPER), WALLPAPER_SETTINGS)) {
-                        wallpaperMessage("无法自动打开系统壁纸设置。请从桌面长按空白处进入壁纸设置。");
+                        wallpaperMessage("请长按桌面空白处更换壁纸。");
                     }
                 });
     }
@@ -655,17 +646,16 @@ public final class MainActivity extends Activity {
         } else if (wallpaperRecovery.hasPhoto()) {
             restoreWallpaperPhoto();
         } else {
-            player.prompt("恢复原壁纸", "尚未保存原壁纸。请从相册选原图，便可恢复到主屏幕。",
+            player.prompt("恢复原壁纸", "请从相册选择原图。",
                     "选择原壁纸", () -> chooseWallpaperPhoto(true));
         }
     }
 
     private void offerWallpaperRestore() {
         if (player == null) return;
-        player.prompt("恢复原壁纸", "系统尚未恢复原壁纸。可从系统壁纸设置中重新选择原来的壁纸。",
-                "打开系统壁纸设置", () -> {
+        player.prompt("恢复原壁纸", "请在系统壁纸设置中选择原壁纸。", "去设置", () -> {
                     if (!launchWallpaperPicker(new Intent(Intent.ACTION_SET_WALLPAPER), WALLPAPER_RESTORE_SETTINGS)) {
-                        wallpaperMessage("无法自动打开系统壁纸设置。请从桌面长按空白处进入壁纸设置。");
+                        wallpaperMessage("请长按桌面空白处更换壁纸。");
                     }
                 });
     }
@@ -738,20 +728,17 @@ public final class MainActivity extends Activity {
         if (player == null) return;
         if (applied == wanted) {
             if (applied) {
-                player.prompt("壁纸已应用", "BandoriLovePet 已设为主屏幕壁纸。", "查看桌面", () ->
+                player.prompt("壁纸已应用", "已设为主屏幕壁纸。", "查看桌面", () ->
                         startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)));
             } else player.notice("已恢复主屏幕壁纸");
         } else if (!wanted) {
-            if (request == WALLPAPER_RESTORE_SETTINGS) wallpaperMessage("主屏幕仍在使用 BandoriLovePet。");
+            if (request == WALLPAPER_RESTORE_SETTINGS) wallpaperMessage("原壁纸未恢复。");
             else offerWallpaperRestore();
+        } else if (hasWallpaper(WallpaperManager.FLAG_LOCK)) {
+            player.prompt("只设置了锁屏", "请再选择「主屏幕」。", "打开壁纸列表", this::openWallpaperList);
         } else {
-            String reason = hasWallpaper(WallpaperManager.FLAG_LOCK)
-                    ? "BandoriLovePet 目前只应用到了锁屏。"
-                    : "系统返回后，主屏幕仍在使用原壁纸。";
-            if (request == WALLPAPER_PREVIEW) offerWallpaperList(reason);
-            else if (request == WALLPAPER_LIST) offerWallpaperSettings(reason + "\n" + WALLPAPER_PERMISSION_HINT);
-            else wallpaperMessage(reason + "\n" + WALLPAPER_PERMISSION_HINT);
+            player.prompt("壁纸未应用", WALLPAPER_PERMISSION_HINT, "去设置", () -> openPermission("wallpaper"));
         }
     }
 

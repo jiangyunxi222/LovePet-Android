@@ -76,7 +76,7 @@
       <button id="edit-scene" class="scene-entry"><span>壁纸设置</span><small>背景 · 角色 · 特效</small><span aria-hidden="true">›</span></button>
       <button id="open-performance" class="scene-entry" type="button" aria-haspopup="dialog" aria-controls="performance-settings" hidden><span>演出设置</span><small>衣装 · 动作 · 表情 · 语音</small><span aria-hidden="true">›</span></button>
       <button id="open-theme" class="scene-entry" type="button" aria-haspopup="dialog" aria-controls="theme-settings"><span>主题配色</span><small id="theme-current"></small><span aria-hidden="true">›</span></button>
-      <button id="open-permissions" class="scene-entry" aria-haspopup="dialog"><span>权限配置</span><small>桌宠 · 通知 · 壁纸</small><span aria-hidden="true">›</span></button>
+      <button id="open-permissions" class="scene-entry" aria-haspopup="dialog"><span>权限配置</span><span aria-hidden="true">›</span></button>
       <fieldset class="placement-options">
         <legend>桌宠显示位置</legend>
         <label class="placement-option">
@@ -89,8 +89,8 @@
         </label>
       </fieldset>
       <div id="usage-access" role="status" hidden>
-        <p>此模式需要系统的使用情况访问权限。</p>
-        <button id="grant-usage">前往授权</button>
+        <p>请开启「使用情况访问」。</p>
+        <button id="grant-usage">去设置</button>
       </div>
       <div class="settings-switches" id="role-settings" hidden>
         <label class="settings-switch">
@@ -169,26 +169,25 @@
     </header>
     <div class="settings-content permission-list">
       <div class="permission-row">
-        <div><strong>悬浮窗</strong><p>显示桌宠时需要允许显示在其他应用上层。</p></div>
+        <strong>悬浮窗</strong>
         <span class="permission-state" id="perm-overlay">正在检查</span>
         <button data-permission="overlay">去设置</button>
       </div>
       <div class="permission-row">
-        <div><strong>使用情况访问</strong><p>桌宠选择「在主屏幕显示」时需要。</p></div>
+        <strong>使用情况访问</strong>
         <span class="permission-state" id="perm-usage">正在检查</span>
         <button data-permission="usage">去设置</button>
       </div>
       <div class="permission-row">
-        <div><strong>通知</strong><p>用于在通知栏显示桌宠状态及退出按钮。</p></div>
+        <strong>通知</strong>
         <span class="permission-state" id="perm-notifications">正在检查</span>
         <button data-permission="notifications">去设置</button>
       </div>
       <div class="permission-row">
-        <div><strong>动态壁纸</strong><p id="perm-wallpaper-detail">点首页的「壁纸」后，在系统页面选择主屏幕。</p></div>
+        <strong>动态壁纸</strong>
         <span class="permission-state" id="perm-wallpaper">正在检查</span>
-        <button data-permission="wallpaper">应用信息</button>
+        <button data-permission="wallpaper">去设置</button>
       </div>
-      <p class="permission-note">选模型、背景素材或原壁纸时，由系统授权所选内容。</p>
     </div>
   </dialog>
   <dialog id="app-prompt" aria-labelledby="app-prompt-title">
