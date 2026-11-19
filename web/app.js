@@ -35,6 +35,7 @@ let engines;
 let menuHintTimer;
 const previewControlTimers = new Map();
 const reportedControls = new Map();
+let previewPress;
 document.documentElement.classList.toggle("pet", pet);
 document.documentElement.classList.toggle("wallpaper", wallpaper);
 
@@ -271,13 +272,18 @@ function makeRenderer() {
   const canvas = document.createElement("canvas");
   const attributes = { alpha: true, stencil: true, antialias: true, preserveDrawingBuffer: true };
   const context = canvas.getContext("webgl2", attributes)
+    || canvas.getContext("webgl", attributes)
     || canvas.getContext("webgl", { ...attributes, antialias: false });
   if (!context) throw new Error("此设备的 Android WebView 无法创建 WebGL 画布");
+  const maxSide = Math.min(context.getParameter(context.MAX_RENDERBUFFER_SIZE), context.getParameter(context.MAX_TEXTURE_SIZE));
+  const [maxWidth, maxHeight] = Array.from(context.getParameter(context.MAX_VIEWPORT_DIMS), value => Math.min(value, maxSide));
+  const resolutionFor = (width, height) => Math.min(devicePixelRatio || 1,
+    maxWidth / width, maxHeight / height);
   // Some Android GPU configurations support WebGL 2 while blocking WebGL 1.
   const renderer = new PIXI.Renderer({
     view: canvas, context,
     width: stage.clientWidth, height: stage.clientHeight,
-    backgroundAlpha: 0, resolution: Math.min(devicePixelRatio, 1.5),
+    backgroundAlpha: 0, resolution: resolutionFor(stage.clientWidth, stage.clientHeight),
     autoDensity: !pet, antialias: context.getContextAttributes().antialias, preserveDrawingBuffer: true,
   });
   const contents = new PIXI.Container();
@@ -294,7 +300,10 @@ function makeRenderer() {
   function syncCanvas() {
     const { clientWidth: width, clientHeight: height } = stage;
     if (!width || !height) return;
-    if (Math.abs(renderer.screen.width - width) >= 1 || Math.abs(renderer.screen.height - height) >= 1) {
+    const resolution = resolutionFor(width, height);
+    if (renderer.resolution !== resolution || Math.abs(renderer.screen.width - width) >= 1 ||
+        Math.abs(renderer.screen.height - height) >= 1) {
+      renderer.resolution = resolution;
       renderer.resize(width, height);
       placeModel();
       renderer.render(contents);
@@ -313,8 +322,8 @@ function makeRenderer() {
   };
   const resize = new ResizeObserver(() => {
     scheduleCanvasSync();
+    positionPetMenu();
     if (pet) {
-      positionPetMenu();
       if (!petMenuButton.hidden) reportPetBounds("menuButton", petMenuButton.getBoundingClientRect());
     }
   });
@@ -402,12 +411,26 @@ function placeModel() {
   view.model.anchor.set(.5, fitVisible ? .5 : 1);
   view.model.position.set(width * .5, height * (fitVisible ? .5 : .985));
   const fitted = fitVisible ? fitVisibleModel(width, height) : null;
+  if (view.sceneCharacterTransform) {
+    const { scale, x, y } = view.sceneCharacterTransform;
+    const centerX = width / 2, centerY = height / 2;
+    view.model.scale.set(view.model.scale.x * scale);
+    view.model.position.set(centerX + width * x + (view.model.position.x - centerX) * scale,
+      centerY + height * y + (view.model.position.y - centerY) * scale);
+  }
   if (pet && view.session.limited) {
     view.menuAnchor = fitted ? (fitted.top + fitted.height * .36) / height : .36;
     petMenuButton.style.top = (100 * view.menuAnchor) + "%";
     if (!petMenuButton.hidden) reportPetBounds("menuButton", petMenuButton.getBoundingClientRect());
     positionPetMenu();
   }
+}
+
+function setSceneCharacterTransform({ scale, x, y }) {
+  const previous = view.sceneCharacterTransform;
+  if (previous?.scale === scale && previous.x === x && previous.y === y) return;
+  view.sceneCharacterTransform = { scale, x, y };
+  placeModel();
 }
 
 function motionFades(model, metadata) {
@@ -442,6 +465,11 @@ async function selectCostume(costume) {
     if (generation !== view.generation) {
       next.destroy({ children: true });
       return;
+    }
+    if (next.internalModel.coreModel.isUsingMasking?.()) {
+      const gl = view.app.renderer.gl;
+      // The default 256-pixel mask atlas leaks lip textures at high zoom.
+      next.internalModel.renderer.setClippingMaskBufferSize(Math.min(1024, gl.getParameter(gl.MAX_TEXTURE_SIZE)));
     }
     const outgoing = view.app.stage.removeChildren();
     view.model = next;
@@ -737,7 +765,7 @@ window.setDesktopCrop = (...bounds) => {
 
 function positionPetMenu() {
   if (petMenu.hidden) return;
-  const area = desktopControlArea();
+  const area = pet || wallpaper ? desktopControlArea() : { x: 0, y: 0, width: innerWidth, height: innerHeight };
   petMenu.style.maxWidth = Math.max(0, area.width - 8) + "px";
   petMenu.style.maxHeight = Math.max(0, area.height - 8) + "px";
   const right = area.x + area.width - petMenu.offsetWidth - 4;
@@ -752,20 +780,19 @@ function positionPetMenu() {
   }
   petMenu.style.top = Math.max(area.y + 4, Math.min(bottom, top)) + "px";
   petMenu.style.left = Math.max(area.x + 4, Math.min(right, left)) + "px";
-  reportPetBounds("menu", petMenu.getBoundingClientRect());
+  if (pet) reportPetBounds("menu", petMenu.getBoundingClientRect());
 }
 
 function showPetMenu(show = petMenu.hidden) {
-  if (!pet && !wallpaper) return;
   petMenu.hidden = !show;
   if (show) {
     clearTimeout(menuHintTimer);
     petMenuButton.hidden = true;
-    reportPetBounds("menuButton", null);
+    if (pet) reportPetBounds("menuButton", null);
     petMenu.scrollTop = 0;
     positionPetMenu();
   } else {
-    reportPetBounds("menu", null);
+    if (pet) reportPetBounds("menu", null);
     showMenuHint();
   }
 }
@@ -781,17 +808,24 @@ function showMenuHint() {
   }, 3000);
 }
 
-function avatarClick(event) {
-  if (!view.model || !$("#loading").hidden) return;
-  if (view.session.limited) {
-    if ((pet || wallpaper) && !petMenu.hidden) showPetMenu(false);
-    else showMenuHint();
-    return;
-  }
+function avatarCoordinates(event) {
+  if (!view.model || view.session.limited || !$("#loading").hidden) return;
   const rect = $("#canvas").getBoundingClientRect();
+  const x = (event.clientX - rect.left) / rect.width;
+  const y = (event.clientY - rect.top) / rect.height;
+  if (x >= 0 && x < 1 && y >= 0 && y < 1) return { x, y };
+}
+
+function avatarOpaque({ x, y }) {
+  const pixel = (Math.floor(y * touchRows) * touchColumns + Math.floor(x * touchColumns)) * 4;
+  return view.app.readAlpha()[pixel + 3] >= 28;
+}
+
+function avatarRegion(event) {
+  const coordinates = avatarCoordinates(event);
+  if (!coordinates) return;
   const point = view.model.toModelPosition(new PIXI.Point(
-    (event.clientX - rect.left) * view.app.screen.width / rect.width,
-    (event.clientY - rect.top) * view.app.screen.height / rect.height));
+    coordinates.x * view.app.screen.width, coordinates.y * view.app.screen.height));
   const internal = view.model.internalModel;
   if (view.costume.cubism3) {
     point.x = (point.x - internal.originalWidth / 2) / internal.pixelsPerUnit;
@@ -800,6 +834,26 @@ function avatarClick(event) {
   const regions = view.costume.hitRegions || {};
   const contains = (box) => box && point.x >= box[0] && point.x <= box[2] && point.y >= box[1] && point.y <= box[3];
   const region = ["menu", "expression", "voice", "left", "right", "body", "wardrobe"].find((name) => contains(regions[name]));
+  if (region || !view.costume.cubism3) return region;
+
+  // Instruments and wide costumes can extend past the authored rectangles.
+  // Extend those touch bands over the visible model while leaving the background alone.
+  const band = ["menu", "left", "right"].find((name) => {
+    const box = regions[name];
+    if (!box || point.y < box[1] || point.y > box[3]) return false;
+    return name === "menu" || (name === "left" ? point.x > box[2] : point.x < box[0]);
+  });
+  if (band && avatarOpaque(coordinates)) return band;
+}
+
+function avatarClick(event) {
+  if (!view.model || !$("#loading").hidden) return;
+  if (view.session.limited) {
+    if ((pet || wallpaper) && !petMenu.hidden) showPetMenu(false);
+    else showMenuHint();
+    return;
+  }
+  const region = avatarRegion(event);
   if (region === "menu") showPetMenu();
   else if (region === "wardrobe") playInteraction("costume");
   else if (region === "voice" || region === "expression") playInteraction(region);
@@ -900,7 +954,38 @@ $("#controls-toggle").onchange = (event) => {
   updateControlsVisibility();
   settings.close();
 };
-$("#canvas").onclick = (event) => {
+const avatarCanvas = $("#canvas");
+function endPreviewPress() {
+  clearTimeout(previewPress?.timer);
+  previewPress = undefined;
+}
+avatarCanvas.addEventListener("pointerdown", (event) => {
+  endPreviewPress();
+  const root = document.documentElement;
+  if (event.pointerType !== "touch" || !event.isPrimary || !root.classList.contains("immersive-preview") ||
+      (root.classList.contains("scene-edit") && !root.classList.contains("scene-preview"))) return;
+  const press = { id: event.pointerId, x: event.clientX, y: event.clientY, opened: false };
+  // Android can suppress click after a long touch, so open the menu while it is held.
+  press.timer = setTimeout(() => {
+    const coordinates = avatarCoordinates(event);
+    if (coordinates && avatarOpaque(coordinates)) {
+      press.opened = true;
+      showPetMenu(true);
+    }
+  }, 450);
+  previewPress = press;
+});
+avatarCanvas.addEventListener("pointermove", (event) => {
+  if (previewPress && event.pointerId === previewPress.id &&
+      Math.hypot(event.clientX - previewPress.x, event.clientY - previewPress.y) > 12) endPreviewPress();
+});
+avatarCanvas.addEventListener("pointerup", () => clearTimeout(previewPress?.timer));
+avatarCanvas.addEventListener("pointercancel", endPreviewPress);
+avatarCanvas.addEventListener("contextmenu", (event) => { if (previewPress) event.preventDefault(); });
+avatarCanvas.onclick = (event) => {
+  const opened = previewPress?.opened;
+  endPreviewPress();
+  if (opened) return;
   if (document.documentElement.classList.contains("scene-edit")) {
     if (document.documentElement.classList.contains("scene-preview")) avatarClick(event);
     return;
@@ -913,6 +998,7 @@ $("#stage").addEventListener("click", (event) => {
   const { top, bottom } = event.currentTarget.getBoundingClientRect();
   const edge = event.clientY < top + 64 ? "top" : event.clientY > bottom - 64 ? "bottom" : null;
   if (!edge || !root.classList.contains("preview-" + edge + "-hidden")) return;
+  if (event.target.closest("#canvas") && avatarRegion(event)) return;
   revealPreviewControls(edge);
   event.stopPropagation();
 }, { capture: true });
@@ -939,4 +1025,7 @@ window.wallpaperTap = (x, y) => {
   if (target?.closest("#pet-menu, #pet-menu-button")) target.closest("button")?.click();
   else if (target?.closest("#canvas")) avatarClick({clientX, clientY});
 };
-window.addEventListener("scene-editor-change", updateControlsVisibility);
+window.addEventListener("scene-editor-change", () => {
+  showPetMenu(false);
+  updateControlsVisibility();
+});

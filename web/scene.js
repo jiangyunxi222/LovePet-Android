@@ -104,8 +104,12 @@
   function applyNode(layer, node, index) {
     node.style.zIndex = index + 1;
     node.style.opacity = layer.visible ? layer.opacity : 0;
+    if (layer.kind === "character") {
+      node.style.pointerEvents = layer.visible && layer.opacity > 0 ? "auto" : "none";
+      setSceneCharacterTransform(layer);
+      return;
+    }
     node.style.transform = "translate(" + layer.x * 100 + "%," + layer.y * 100 + "%) scale(" + layer.scale + ")";
-    if (layer.kind === "character") node.style.pointerEvents = layer.visible && layer.opacity > 0 ? "auto" : "none";
   }
   function particleOptions(type) {
     const particles = {
@@ -322,6 +326,7 @@
     const on = document.documentElement.classList.toggle("scene-preview");
     $("#scene-preview").textContent = on ? "编辑" : "预览";
     $("#scene-preview").setAttribute("aria-pressed", String(on));
+    if (!on) showPetMenu(false);
   };
   for (const [color, [name, background]] of Object.entries(palettes)) {
     if (color === "default") continue;
@@ -376,7 +381,7 @@
   }
   $("#scene-add-effect").onclick = () => chooseLayer("effect");
   $("#scene-add-background").onclick = () => chooseLayer("background");
-  // Keep the renderer dimensions steady during gestures; only transform this layer.
+  // Keep the framebuffer size steady during gestures.
   const stage = $("#stage"), fingers = new Map();
   let gesture;
   function beginGesture() {
