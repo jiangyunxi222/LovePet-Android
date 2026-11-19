@@ -1,4 +1,4 @@
-package io.bandorilove.pet;
+package io.bandorilove.lovepet;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -25,7 +25,7 @@ import org.json.JSONObject;
 
 public final class PetService extends Service {
     static final String NOTIFICATION_CHANNEL = "pet";
-    private static final String STOP = "io.bandorilove.pet.STOP_PET";
+    private static final String STOP = "io.bandorilove.lovepet.STOP_PET";
     private static final String HOME_ONLY = "homeOnly";
     private static final int OVERLAY_FLAGS = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
             | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN

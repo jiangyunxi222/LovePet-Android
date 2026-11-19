@@ -1,4 +1,4 @@
-package io.bandorilove.pet;
+package io.bandorilove.lovepet;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;

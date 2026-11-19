@@ -1,4 +1,4 @@
-package io.bandorilove.pet;
+package io.bandorilove.lovepet;
 
 import org.json.JSONArray;
 import org.json.JSONObject;

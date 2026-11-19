@@ -1,4 +1,4 @@
-package io.bandorilove.pet;
+package io.bandorilove.lovepet;
 
 import android.app.ActivityManager;
 import android.app.Application;
@@ -19,8 +19,8 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 final class DesktopRuntime {
-    private static final String EVENT = "io.bandorilove.pet.DESKTOP_EVENT";
-    private static final String PERMISSION = "io.bandorilove.pet.permission.DESKTOP_EVENT";
+    private static final String EVENT = "io.bandorilove.lovepet.DESKTOP_EVENT";
+    private static final String PERMISSION = "io.bandorilove.lovepet.permission.DESKTOP_RUNTIME";
     private static final boolean DESKTOP = Application.getProcessName().endsWith(":desktop");
     private static Context app;
     private static volatile boolean remoteShowing;

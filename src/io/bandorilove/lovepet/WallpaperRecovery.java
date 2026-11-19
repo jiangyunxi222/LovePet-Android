@@ -1,4 +1,4 @@
-package io.bandorilove.pet;
+package io.bandorilove.lovepet;
 
 import android.app.WallpaperManager;
 import android.content.ComponentName;

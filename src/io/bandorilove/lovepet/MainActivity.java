@@ -1,4 +1,4 @@
-package io.bandorilove.pet;
+package io.bandorilove.lovepet;
 
 import android.app.Activity;
 import android.app.NotificationChannel;
@@ -9,6 +9,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.graphics.Bitmap;
@@ -120,7 +121,7 @@ public final class MainActivity extends Activity {
             if (WebView.getCurrentWebViewPackage() == null) {
                 throw new IllegalStateException("Android WebView provider is unavailable");
             }
-            WebView.setWebContentsDebuggingEnabled(true);
+            WebView.setWebContentsDebuggingEnabled((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0);
             player = new PetWeb(this, false, this::choose, this::togglePet, () -> {}, this::changePlacement,
                     this::setSettingsVisible, this::setImmersivePreview,
                     () -> showPlayerError("网页渲染进程已退出，请重试。若再次发生，请更新系统 WebView。"));
