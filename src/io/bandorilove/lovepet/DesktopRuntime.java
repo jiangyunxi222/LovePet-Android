@@ -62,6 +62,9 @@ final class DesktopRuntime {
             case "scene":
                 if (DESKTOP) PetWallpaperService.refreshScene();
                 break;
+            case WallpaperTilt.SETTING:
+                if (DESKTOP) PetWallpaperService.refreshTilt();
+                break;
             case "captions":
                 if (DESKTOP) {
                     boolean enabled = intent.getBooleanExtra("flag", true);

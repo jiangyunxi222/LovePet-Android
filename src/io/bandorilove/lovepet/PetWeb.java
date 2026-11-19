@@ -2,6 +2,7 @@ package io.bandorilove.lovepet;
 
 import android.content.Context;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.RectF;
 import android.net.Uri;
 import android.os.Handler;
@@ -27,14 +28,21 @@ final class PetWeb {
     private final WebView view;
     private final boolean desktop;
     private final WallpaperMedia.Writer mediaWriter;
+    private final WallpaperTilt tilt;
     private volatile boolean wallpaperMode;
     private boolean wallpaperShown;
+    private boolean pageReady;
+    private boolean tiltShowing;
+    private boolean previewTilt;
+    private boolean paused;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final PetTouchShape touchShape = new PetTouchShape();
     private Runnable onTouchShapeChanged = () -> {};
     private Runnable applyWallpaper = () -> {};
+    private Runnable applyWallpaperScene = () -> {};
     private Runnable wallpaperFrameReady = () -> {};
     private Runnable promptAction;
+    private Runnable promptAlternative;
     private int promptId;
 
     PetWeb(Context context, boolean desktop, Runnable pick, Runnable toggle, Runnable openPanel, Consumer<Boolean> placement,
@@ -45,6 +53,7 @@ final class PetWeb {
         mediaWriter = new WallpaperMedia.Writer(context);
         store = new ModelStore(context);
         view = new WebView(context);
+        tilt = new WallpaperTilt(context, (x, y) -> evaluate("window.sceneLayers?.shiftBackground(" + x + "," + y + ")"));
         view.setBackgroundColor(desktop ? Color.TRANSPARENT : Color.rgb(250, 246, 249));
         WebSettings settings = view.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -55,8 +64,10 @@ final class PetWeb {
         settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         view.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView window, String url) {
+                pageReady = true;
                 if (wallpaperMode) wallpaperVisible(wallpaperShown);
-                else if (context instanceof MainActivity) ((MainActivity) context).updateWallpaperStatus();
+                else if (context instanceof MainActivity) ((MainActivity) context).wallpaperPageReady();
+                updateWallpaperTilt();
             }
             @Override public boolean shouldOverrideUrlLoading(WebView window, WebResourceRequest request) {
                 return true;
@@ -88,12 +99,39 @@ final class PetWeb {
             @JavascriptInterface public void togglePet() { main.post(toggle); }
             @JavascriptInterface public void openPanel() { if (desktop) main.post(openPanel); }
             @JavascriptInterface public void applyWallpaper() { if (!desktop && !wallpaperMode) main.post(applyWallpaper); }
+            @JavascriptInterface public void applyWallpaperScene() { if (!desktop && !wallpaperMode) main.post(applyWallpaperScene); }
+            @JavascriptInterface public void dismissWallpaperSuccess(long request, boolean viewDesktop) {
+                if (context instanceof MainActivity) main.post(() ->
+                        ((MainActivity) context).dismissWallpaperSuccess(request, viewDesktop));
+            }
+            @JavascriptInterface public void panelLoading(int generation) {
+                if (context instanceof MainActivity) main.post(() -> ((MainActivity) context).panelLoading(generation));
+            }
+            @JavascriptInterface public void panelFrameReady(int generation, boolean ready) {
+                if (context instanceof MainActivity) main.post(() -> afterVisualState(
+                        () -> ((MainActivity) context).panelFrameReady(generation, ready)));
+            }
             @JavascriptInterface public void wallpaperFrameReady() {
                 main.post(() -> {
                     if (!wallpaperMode) return;
-                    view.postVisualStateCallback(0, new WebView.VisualStateCallback() {
-                        @Override public void onComplete(long requestId) { wallpaperFrameReady.run(); }
-                    });
+                    afterVisualState(wallpaperFrameReady);
+                });
+            }
+            @JavascriptInterface public boolean hasWallpaperTilt() { return tilt.available(); }
+            @JavascriptInterface public boolean wallpaperTiltEnabled() {
+                return "true".equals(DesktopRuntime.read(context, WallpaperTilt.SETTING));
+            }
+            @JavascriptInterface public boolean setWallpaperTiltEnabled(boolean enabled) {
+                if (!(context instanceof MainActivity) || !tilt.available()) return false;
+                if (!DesktopRuntime.write(context, WallpaperTilt.SETTING, Boolean.toString(enabled))) return false;
+                main.post(PetWeb.this::updateWallpaperTilt);
+                DesktopRuntime.signal(WallpaperTilt.SETTING);
+                return true;
+            }
+            @JavascriptInterface public void setWallpaperTiltPreview(boolean show) {
+                if (context instanceof MainActivity) main.post(() -> {
+                    previewTilt = show;
+                    updateWallpaperTilt();
                 });
             }
             @JavascriptInterface public String desktopSetting(String key) {
@@ -127,12 +165,14 @@ final class PetWeb {
             @JavascriptInterface public void openPermission(String permission) {
                 if (context instanceof MainActivity) main.post(() -> ((MainActivity) context).openPermission(permission));
             }
-            @JavascriptInterface public void answerPrompt(int id, boolean confirmed) {
+            @JavascriptInterface public void answerPrompt(int id, String answer) {
                 main.post(() -> {
                     if (id != promptId) return;
-                    Runnable action = promptAction;
+                    Runnable action = "confirm".equals(answer) ? promptAction
+                            : "alternate".equals(answer) ? promptAlternative : null;
                     promptAction = null;
-                    if (confirmed && action != null) action.run();
+                    promptAlternative = null;
+                    if (action != null) action.run();
                 });
             }
             @JavascriptInterface public void updateSavedModel(int request, String id, int costume, boolean remove) {
@@ -238,13 +278,22 @@ final class PetWeb {
         view.loadUrl(HOME + "?wallpaper=1");
     }
     void onApplyWallpaper(Runnable action) { applyWallpaper = action; }
+    void onApplyWallpaperScene(Runnable action) { applyWallpaperScene = action; }
     void onWallpaperFrameReady(Runnable action) { wallpaperFrameReady = action; }
-    void canCacheWallpaperFrame(Consumer<Boolean> callback) {
-        view.evaluateJavascript("window.canCacheWallpaperFrame?.() === true", result -> callback.accept("true".equals(result)));
-    }
     void setPaused(boolean paused) {
+        this.paused = paused;
         if (paused) view.onPause();
         else view.onResume();
+        updateWallpaperTilt();
+    }
+    void setWallpaperTiltVisible(boolean showing) {
+        tiltShowing = showing;
+        updateWallpaperTilt();
+    }
+    void updateWallpaperTilt() {
+        boolean showing = wallpaperMode ? tiltShowing : context instanceof MainActivity && !paused && previewTilt;
+        boolean enabled = tilt.setEnabled(showing && "true".equals(DesktopRuntime.read(context, WallpaperTilt.SETTING)));
+        if (pageReady) evaluate("window.sceneLayers?.setTiltActive(" + enabled + ")");
     }
     void wallpaperVisible(boolean visible) {
         wallpaperShown = visible;
@@ -280,16 +329,31 @@ final class PetWeb {
         evaluate("window.wallpaperPreviewResult?.(" + request + "," + JSONObject.quote(preview) + ")");
     }
     void prompt(String title, String message, String action, Runnable callback) {
+        prompt(title, message, action, callback, null, null);
+    }
+    void prompt(String title, String message, String action, Runnable callback, String alternative, Runnable onAlternative) {
         promptAction = callback;
+        promptAlternative = onAlternative;
         evaluate("window.showAppPrompt?.(" + (++promptId) + "," + JSONObject.quote(title) + ","
-                + JSONObject.quote(message) + "," + (action == null ? "null" : JSONObject.quote(action)) + ")");
+                + JSONObject.quote(message) + "," + (action == null ? "null" : JSONObject.quote(action))
+                + ",null," + (alternative == null ? "null" : JSONObject.quote(alternative)) + ")");
     }
     void notice(String message) { evaluate("window.showAppNotice?.(" + JSONObject.quote(message) + ")"); }
+    boolean isPageReady() { return pageReady; }
+    void panelFramePresented(int generation, boolean ready) {
+        evaluate("window.panelFramePresented?.(" + generation + "," + ready + ")");
+    }
+    void showWallpaperSuccess(long request) { evaluate("window.showWallpaperSuccess?.(" + request + ")"); }
     void wallpaperStatus(boolean applied, boolean changing) {
         evaluate("window.setHomeWallpaperState?.(" + applied + "," + changing + ")");
     }
-    void permissionStatus(boolean overlay, boolean usage, boolean notifications, String wallpaper) {
-        evaluate("window.setPermissionStatus?.(" + overlay + "," + usage + "," + notifications + ","
+    void panelInsets(Insets insets) {
+        float density = view.getResources().getDisplayMetrics().density;
+        evaluate("window.setPanelInsets?.(" + insets.top / density + "," + insets.right / density + ","
+                + insets.bottom / density + "," + insets.left / density + ")");
+    }
+    void permissionStatus(boolean overlay, boolean usage, String wallpaper) {
+        evaluate("window.setPermissionStatus?.(" + overlay + "," + usage + ","
                 + JSONObject.quote(wallpaper) + ")");
     }
     void desktopCrop(RectF bounds) {
@@ -306,8 +370,17 @@ final class PetWeb {
         evaluate("window.receiveCommand?.(" + command + "," + sound + ")");
     }
     private void evaluate(String script) { view.evaluateJavascript(script, null); }
+    private void afterVisualState(Runnable complete) {
+        if (!view.isAttachedToWindow()) return;
+        view.postVisualStateCallback(0, new WebView.VisualStateCallback() {
+            @Override public void onComplete(long requestId) {
+                if (view.isAttachedToWindow()) complete.run();
+            }
+        });
+    }
     void destroy() {
         main.removeCallbacksAndMessages(null);
+        tilt.setEnabled(false);
         wallpaperMode = false;
         wallpaperFrameReady = () -> {};
         mediaWriter.abort();

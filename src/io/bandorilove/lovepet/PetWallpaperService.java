@@ -2,7 +2,6 @@ package io.bandorilove.lovepet;
 
 import android.app.Presentation;
 import android.app.WallpaperManager;
-import android.graphics.Bitmap;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.os.Bundle;
@@ -11,31 +10,29 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.service.wallpaper.WallpaperService;
 import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.MotionEvent;
-import android.view.PixelCopy;
 import android.view.SurfaceHolder;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewConfiguration;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
-import android.widget.ImageView;
 
-import java.io.File;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import org.json.JSONObject;
 
 public final class PetWallpaperService extends WallpaperService {
     private static final long RENDERER_RETRY_DELAY_MS = 500;
     private static final long RENDERER_RETRY_INTERVAL_MS = 30_000;
     private static final long SURFACE_GRACE_MS = 5_000;
+    private static final long VISIBILITY_GRACE_MS = 450;
     private static final long GAZE_HOLD_MS = 300;
     private static final Set<PetEngine> engines = new HashSet<>();
-    private final ExecutorService frameIo = Executors.newSingleThreadExecutor();
 
     static void refresh() {
         for (PetEngine engine : engines) {
@@ -45,6 +42,10 @@ public final class PetWallpaperService extends WallpaperService {
 
     static void refreshScene() {
         for (PetEngine engine : engines) if (engine.player != null) engine.player.refreshWallpaperScene();
+    }
+
+    static void refreshTilt() {
+        for (PetEngine engine : engines) if (engine.player != null) engine.player.updateWallpaperTilt();
     }
 
     static void updateCaptions(boolean enabled) {
@@ -74,33 +75,27 @@ public final class PetWallpaperService extends WallpaperService {
         DesktopRuntime.initialize(this);
     }
 
-    @Override public void onDestroy() {
-        super.onDestroy();
-        frameIo.shutdown();
-    }
-
     private final class PetEngine extends Engine {
         private final Handler main = new Handler(Looper.getMainLooper());
         private final Runnable retryRenderer = this::startRenderer;
         private final Runnable releaseDetachedRenderer = this::release;
-        private final Runnable captureFrame = this::captureFrame;
+        private final Runnable pauseHiddenRenderer = () -> setRendererVisible(false);
         private final Runnable startGaze = () -> {
             followingGaze = true;
             updateGaze();
         };
         private final Runnable updateGazeFrame = this::updateGaze;
-        private final ModelStore models = new ModelStore(PetWallpaperService.this);
-        private final WallpaperFrame frameCache = new WallpaperFrame(getCacheDir());
         private VirtualDisplay display;
         private Presentation presentation;
         private PetWeb player;
-        private ImageView previousFrame;
+        private View recoveryCover;
         private int surfaceWidth;
         private int surfaceHeight;
         private int displayWidth;
         private int displayHeight;
         private boolean visible;
-        private boolean frameReady;
+        private boolean rendererVisible;
+        private boolean destroyed;
         private boolean followingGaze;
         private int gazePointer = -1;
         private float downX, downY, gazeX, gazeY;
@@ -127,7 +122,8 @@ public final class PetWallpaperService extends WallpaperService {
                     displayHeight = height;
                 }
                 if (display.getSurface() != holder.getSurface()) display.setSurface(holder.getSurface());
-                player.wallpaperVisible(visible);
+                setRendererVisible(visible);
+                if (player != null) player.setWallpaperTiltVisible(visible);
                 return;
             }
             startRenderer();
@@ -136,11 +132,15 @@ public final class PetWallpaperService extends WallpaperService {
         private void startRenderer() {
             main.removeCallbacks(retryRenderer);
             SurfaceHolder holder = getSurfaceHolder();
-            if (display != null || surfaceWidth <= 0 || !holder.getSurface().isValid()) return;
+            if (destroyed || display != null || surfaceWidth <= 0 || !holder.getSurface().isValid()) return;
+            createRenderer();
+        }
+
+        private void createRenderer() {
             try {
                 display = getSystemService(DisplayManager.class).createVirtualDisplay(
                         "BandoriLovePet wallpaper", surfaceWidth, surfaceHeight, getResources().getDisplayMetrics().densityDpi,
-                        holder.getSurface(), DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+                        getSurfaceHolder().getSurface(), DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
                                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION);
                 if (display == null) throw new IllegalStateException("Wallpaper display unavailable");
                 displayWidth = surfaceWidth;
@@ -151,92 +151,79 @@ public final class PetWallpaperService extends WallpaperService {
                 window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED);
                 window.setBackgroundDrawableResource(android.R.color.transparent);
                 window.setDecorFitsSystemWindows(false);
-                player = new PetWeb(presentation.getContext(), false, () -> {}, () -> {}, () -> {},
-                        ignored -> {}, ignored -> {}, ignored -> {}, this::rendererFailed);
-                PetWeb current = player;
-                current.onWallpaperFrameReady(() -> showLiveFrame(current));
                 FrameLayout content = new FrameLayout(presentation.getContext());
-                content.addView(current.view(), new FrameLayout.LayoutParams(-1, -1));
                 if (!isPreview()) {
-                    previousFrame = new ImageView(presentation.getContext());
-                    previousFrame.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                    content.addView(previousFrame, new FrameLayout.LayoutParams(-1, -1));
-                    loadPreviousFrame(previousFrame);
+                    recoveryCover = LayoutInflater.from(presentation.getContext())
+                            .inflate(R.layout.wallpaper_recovery_cover, content, false);
+                    content.addView(recoveryCover);
                 }
+                Presentation current = presentation;
                 presentation.setContentView(content);
                 presentation.show();
                 if (window.getInsetsController() != null) window.getInsetsController().hide(WindowInsets.Type.systemBars());
-                player.loadWallpaper();
-                player.wallpaperVisible(visible);
+                if (isPreview()) attachRenderer(current, content);
+                else {
+                    // Submit the cover before starting WebView and loading the Live2D scene.
+                    Runnable attach = () -> attachRenderer(current, content);
+                    content.getViewTreeObserver().registerFrameCommitCallback(() -> main.post(attach));
+                    content.postDelayed(attach, 150);
+                }
             } catch (RuntimeException error) {
                 Log.e("BandoriLovePet", "Wallpaper renderer failed", error);
                 rendererFailed();
             }
         }
 
-        @Override public void onVisibilityChanged(boolean visible) {
-            this.visible = visible;
-            if (player != null) player.wallpaperVisible(visible && surfaceWidth > 0);
-            if (!visible) {
-                endGaze();
-                main.removeCallbacks(retryRenderer);
-                main.removeCallbacks(captureFrame);
-                nextRendererRetryAt = 0;
-            } else if (player == null) {
-                startRenderer();
+        private void attachRenderer(Presentation current, FrameLayout content) {
+            if (presentation != current || player != null) return;
+            try {
+                player = new PetWeb(current.getContext(), false, () -> {}, () -> {}, () -> {},
+                        ignored -> {}, ignored -> {}, ignored -> {}, this::rendererFailed);
+                PetWeb renderer = player;
+                renderer.onWallpaperFrameReady(() -> showLiveFrame(renderer));
+                content.addView(renderer.view(), 0, new FrameLayout.LayoutParams(-1, -1));
+                renderer.loadWallpaper();
+                rendererVisible = visible && surfaceWidth > 0;
+                renderer.wallpaperVisible(rendererVisible);
+                renderer.setWallpaperTiltVisible(rendererVisible);
+            } catch (RuntimeException error) {
+                Log.e("BandoriLovePet", "Wallpaper WebView startup failed", error);
+                rendererFailed();
             }
         }
 
-        private void loadPreviousFrame(ImageView target) {
-            File model = models.active();
-            if (model == null || frameIo.isShutdown()) return;
-            int width = surfaceWidth, height = surfaceHeight;
-            frameIo.execute(() -> {
-                Bitmap bitmap = frameCache.load(model.getName(), width, height);
-                if (bitmap != null) main.post(() -> {
-                    if (previousFrame == target && !frameReady) target.setImageBitmap(bitmap);
-                    else bitmap.recycle();
-                });
-            });
+        @Override public void onVisibilityChanged(boolean visible) {
+            this.visible = visible;
+            main.removeCallbacks(pauseHiddenRenderer);
+            if (!visible) {
+                endGaze();
+                if (player != null) player.setWallpaperTiltVisible(false);
+                main.postDelayed(pauseHiddenRenderer, VISIBILITY_GRACE_MS);
+                main.removeCallbacks(retryRenderer);
+                nextRendererRetryAt = 0;
+            } else if (player == null) {
+                startRenderer();
+            } else {
+                setRendererVisible(surfaceWidth > 0);
+                player.setWallpaperTiltVisible(surfaceWidth > 0);
+            }
+        }
+
+        private void setRendererVisible(boolean showing) {
+            if (player == null || rendererVisible == showing) return;
+            rendererVisible = showing;
+            player.wallpaperVisible(showing);
         }
 
         private void showLiveFrame(PetWeb current) {
             if (player != current) return;
-            frameReady = true;
-            ImageView cover = previousFrame;
-            previousFrame = null;
+            View cover = recoveryCover;
+            recoveryCover = null;
             if (cover != null) {
-                // Swap on the next draw so the live frame is already in the compositor queue.
-                cover.postOnAnimation(() -> {
+                cover.animate().alpha(0f).setDuration(180).setInterpolator(new DecelerateInterpolator()).withEndAction(() -> {
                     if (cover.getParent() instanceof ViewGroup) ((ViewGroup) cover.getParent()).removeView(cover);
-                    cover.setImageDrawable(null);
-                });
+                }).start();
             }
-            main.removeCallbacks(captureFrame);
-            if (!isPreview() && visible) main.postDelayed(captureFrame, 250);
-        }
-
-        private void captureFrame() {
-            PetWeb current = player;
-            if (current == null || !visible || surfaceWidth <= 0 || frameIo.isShutdown()) return;
-            current.canCacheWallpaperFrame(ready -> {
-                if (!ready || player != current || !visible || surfaceWidth <= 0 || frameIo.isShutdown()) return;
-                File model = models.active();
-                int width = current.view().getWidth(), height = current.view().getHeight();
-                if (model == null || width <= 0 || height <= 0) return;
-                float scale = Math.min(1f, 1600f / Math.max(width, height));
-                Bitmap bitmap = Bitmap.createBitmap(Math.max(1, Math.round(width * scale)),
-                        Math.max(1, Math.round(height * scale)), Bitmap.Config.ARGB_8888);
-                try {
-                    PixelCopy.request(presentation.getWindow(), bitmap, result -> {
-                        if (result == PixelCopy.SUCCESS && player == current && !frameIo.isShutdown()) {
-                            frameIo.execute(() -> frameCache.save(model.getName(), bitmap));
-                        } else bitmap.recycle();
-                    }, main);
-                } catch (IllegalArgumentException error) {
-                    bitmap.recycle();
-                }
-            });
         }
 
         private void rendererFailed() {
@@ -324,7 +311,8 @@ public final class PetWallpaperService extends WallpaperService {
         @Override public void onSurfaceDestroyed(SurfaceHolder holder) {
             clearSurfaceState();
             if (display != null) {
-                player.wallpaperVisible(false);
+                setRendererVisible(false);
+                if (player != null) player.setWallpaperTiltVisible(false);
                 display.setSurface(null);
                 main.postDelayed(releaseDetachedRenderer, SURFACE_GRACE_MS);
             }
@@ -335,7 +323,7 @@ public final class PetWallpaperService extends WallpaperService {
             endGaze();
             main.removeCallbacks(retryRenderer);
             main.removeCallbacks(releaseDetachedRenderer);
-            main.removeCallbacks(captureFrame);
+            main.removeCallbacks(pauseHiddenRenderer);
             surfaceWidth = 0;
             surfaceHeight = 0;
             nextRendererRetryAt = 0;
@@ -343,9 +331,9 @@ public final class PetWallpaperService extends WallpaperService {
 
         private void release() {
             endGaze();
-            main.removeCallbacks(captureFrame);
-            frameReady = false;
-            previousFrame = null;
+            main.removeCallbacks(pauseHiddenRenderer);
+            rendererVisible = false;
+            recoveryCover = null;
             if (player != null) {
                 if (player.view().getParent() instanceof ViewGroup) {
                     ((ViewGroup) player.view().getParent()).removeView(player.view());
@@ -364,6 +352,7 @@ public final class PetWallpaperService extends WallpaperService {
         }
 
         @Override public void onDestroy() {
+            destroyed = true;
             engines.remove(this);
             clearSurfaceState();
             release();

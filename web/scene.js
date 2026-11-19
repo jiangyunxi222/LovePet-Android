@@ -49,6 +49,21 @@
   const effects = new Map();
   const identifier = () => Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
   const host = $("#scene-layers");
+  const tiltToggle = $("#scene-tilt");
+  function updateTiltPreview() {
+    if (wallpaper) return;
+    const classes = document.documentElement.classList;
+    native.setWallpaperTiltPreview(!document.hidden && !!view.model &&
+      (classes.contains("scene-preview") || (classes.contains("immersive-preview") && !classes.contains("scene-edit"))));
+  }
+  function shiftBackground(x, y) {
+    host.style.setProperty("--wallpaper-shift-x", (x * 2).toFixed(3) + "%");
+    host.style.setProperty("--wallpaper-shift-y", (y * 2).toFixed(3) + "%");
+  }
+  function setTiltActive(active) {
+    host.classList.toggle("tilt-background", active);
+    if (!active) shiftBackground(0, 0);
+  }
   const database = !wallpaper && new Promise((resolve, reject) => {
     const request = indexedDB.open("wallpaper-media", 1);
     request.onupgradeneeded = () => request.result.createObjectStore("files");
@@ -145,6 +160,7 @@
       setSceneCharacterTransform(layer);
       return;
     }
+    node.classList.toggle("scene-tilt", layer.kind !== "effect");
     node.style.transform = "translate(" + layer.x * 100 + "%," + layer.y * 100 + "%) scale(" + layer.scale + ")";
   }
   function particleOptions(type) {
@@ -347,6 +363,16 @@
     drawStack();
   }
   $("#edit-scene").onclick = openEditor;
+  if (!wallpaper) {
+    tiltToggle.disabled = !native.hasWallpaperTilt();
+    tiltToggle.checked = !tiltToggle.disabled && native.wallpaperTiltEnabled();
+    tiltToggle.onchange = () => {
+      if (!native.setWallpaperTiltEnabled(tiltToggle.checked)) {
+        tiltToggle.checked = native.wallpaperTiltEnabled();
+        message("无法保存背景微动设置。");
+      }
+    };
+  }
   $("#scene-back").onclick = () => {
     $("#scene-choices").hidden = true;
     document.documentElement.classList.remove("scene-edit", "scene-preview");
@@ -360,7 +386,9 @@
     $("#scene-preview").textContent = on ? "编辑" : "预览";
     $("#scene-preview").setAttribute("aria-pressed", String(on));
     if (!on) showPetMenu(false);
+    updateTiltPreview();
   };
+  $("#scene-wallpaper-settings").onclick = () => native.openPermission("wallpaper");
   for (const name of ["opacity", "scale", "x", "y"]) {
     $("#scene-" + name).oninput = (event) => {
       if (isBase(current())) return;
@@ -394,29 +422,49 @@
   };
   // Keep the framebuffer size steady during gestures.
   const stage = $("#stage"), fingers = new Map();
-  let gesture;
+  let gesture, moving = false, suppressClick = false;
   function beginGesture() {
-    const points = [...fingers.values()].slice(0, 2), layer = current();
+    const points = [...fingers.values()];
+    const layer = gesture?.layer || (isBase(current()) ? layers.find(item => item.kind === "character") : current());
     if (!points.length) { gesture = null; return; }
-    gesture = { id: layer.id, x: layer.x, y: layer.y, scale: layer.scale,
+    gesture = { layer, x: layer.x, y: layer.y, scale: layer.scale, bounds: stage.getBoundingClientRect(),
       center: points.length === 2 ? { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 } : points[0],
       distance: points.length === 2 ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) : 0 };
   }
+  function captureGesture() {
+    moving = suppressClick = true;
+    cancelPreviewTouch();
+    for (const id of fingers.keys()) stage.setPointerCapture(id);
+  }
   stage.addEventListener("pointerdown", event => {
-    if (!document.documentElement.classList.contains("scene-edit") || document.documentElement.classList.contains("scene-preview") || isBase(current())) return;
+    if (!fingers.size) suppressClick = false;
+    const root = document.documentElement;
+    const editing = root.classList.contains("scene-edit") && !root.classList.contains("scene-preview");
+    if (wallpaper || !root.classList.contains("immersive-preview") || !view.model || !$("#loading").hidden
+        || (editing && isBase(current())) || event.target.closest("#caption, #pet-menu, button")) return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
-    event.preventDefault(); event.stopPropagation();
+    if (fingers.size >= 2) return;
     fingers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    stage.setPointerCapture(event.pointerId); beginGesture();
-  });
+    beginGesture();
+    if (fingers.size === 2) {
+      if (gesture.layer.kind === "character") view.app?.setScenePinching(true);
+      captureGesture();
+      event.stopPropagation();
+    }
+  }, { capture: true });
   stage.addEventListener("pointermove", event => {
     if (!fingers.has(event.pointerId) || !gesture) return;
-    event.preventDefault();
     fingers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    const layer = layers.find(item => item.id === gesture.id);
-    if (!layer || isBase(layer)) return;
-    const points = [...fingers.values()].slice(0, 2), bounds = stage.getBoundingClientRect();
+    const { layer, bounds } = gesture;
+    if (!layers.includes(layer)) return;
+    const points = [...fingers.values()];
     const center = points.length === 2 ? { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 } : points[0];
+    if (!moving) {
+      if (Math.hypot(center.x - gesture.center.x, center.y - gesture.center.y) < 8) return;
+      captureGesture();
+    }
+    event.preventDefault();
+    event.stopPropagation();
     const distance = points.length === 2 ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) : 0;
     const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
     layer.scale = clamp(gesture.scale * (gesture.distance > 0 ? distance / gesture.distance : 1), .3, 3);
@@ -425,15 +473,21 @@
     layer.y = clamp((center.y - bounds.top - bounds.height / 2 - (gesture.center.y - bounds.top - bounds.height / 2 - gesture.y * bounds.height) * ratio) / bounds.height, -.8, .8);
     const node = layer.kind === "character" ? $("#canvas") : nodes.get(layer.id);
     if (node) applyNode(layer, node, layers.indexOf(layer));
-    editSelected();
-  });
+    if (layer === current() && !$("#scene-editor").hidden) editSelected();
+  }, { capture: true });
   function endGesture(event) {
+    if (event.type === "lostpointercapture" && event.target !== stage) return;
     if (!fingers.delete(event.pointerId)) return;
-    beginGesture(); save();
+    beginGesture();
+    if (moving && !fingers.size) {
+      moving = false;
+      view.app?.setScenePinching(false);
+      save();
+    }
   }
-  stage.addEventListener("pointerup", endGesture);
-  stage.addEventListener("pointercancel", endGesture);
-  stage.addEventListener("lostpointercapture", endGesture);
+  window.addEventListener("pointerup", endGesture, { capture: true });
+  window.addEventListener("pointercancel", endGesture, { capture: true });
+  stage.addEventListener("lostpointercapture", endGesture, { capture: true });
   for (const type of ["image", "video"]) {
     const picker = $("#scene-" + type + "-file");
     $("#scene-add-" + type).onclick = () => picker.click();
@@ -474,9 +528,21 @@
     }
     else showAppNotice("壁纸场景保存失败，请检查可用存储空间。");
   };
-  $("#scene-apply").onclick = () => {
-    save(); $("#scene-back").click();
-    setControlsCollapsed(true);
+  $("#scene-apply").onclick = async () => {
+    if (wallpaperChanging || busy || !view.model) return;
+    if (!save()) return showAppNotice("壁纸场景保存失败，请检查可用存储空间。");
+    wallpaperChanging = true;
+    updateWallpaperButton();
+    try {
+      await publishScene();
+      $("#scene-back").click();
+      setControlsCollapsed(true);
+      native.applyWallpaperScene();
+    } catch (error) {
+      wallpaperChanging = false;
+      updateWallpaperButton();
+      showAppNotice(error.message);
+    }
   };
   window.addEventListener("storage", event => {
     if (event.key !== key || !event.newValue) return;
@@ -487,9 +553,14 @@
       scheduleWallpaperFrame();
     } catch {}
   });
-  document.addEventListener("visibilitychange", () => setVisible(!document.hidden && (!wallpaper || wallpaperVisible)));
+  document.addEventListener("visibilitychange", () => {
+    setVisible(!document.hidden && (!wallpaper || wallpaperVisible));
+    updateTiltPreview();
+  });
   window.sceneLayers = {
     setVisible, get layers() { return JSON.parse(JSON.stringify(layers)); }, open: openEditor,
+    ignoreGestureClick: (event) => suppressClick && event.detail > 0,
+    setTiltActive, shiftBackground, updateTiltPreview,
     mediaReady: () => layers.every(layer => {
       if (!layer.visible || layer.opacity <= 0 || !layer.media) return true;
       const node = nodes.get(layer.id);

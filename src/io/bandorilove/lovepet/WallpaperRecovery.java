@@ -26,7 +26,7 @@ final class WallpaperRecovery {
         photo = new AtomicFile(new File(context.getFilesDir(), "previous-wallpaper.img"));
     }
 
-    boolean matches(int wallpaperId) {
+    private boolean matches(int wallpaperId) {
         return preferences.contains("id") && preferences.getInt("id", 0) == wallpaperId
                 && (liveComponent() != null || hasPhoto());
     }
@@ -35,11 +35,13 @@ final class WallpaperRecovery {
         return ComponentName.unflattenFromString(preferences.getString("component", ""));
     }
 
-    boolean rememberLive(int wallpaperId, ComponentName previous) {
-        boolean saved = preferences.edit().putInt("id", wallpaperId)
-                .putString("component", previous.flattenToString()).commit();
-        if (saved) photo.delete();
-        return saved;
+    void rememberPrevious(int wallpaperId, ComponentName previous) {
+        if (matches(wallpaperId)) return;
+        if (previous == null) {
+            preferences.edit().remove("id").remove("component").apply();
+        } else {
+            preferences.edit().putInt("id", wallpaperId).putString("component", previous.flattenToString()).apply();
+        }
     }
 
     boolean hasPhoto() {

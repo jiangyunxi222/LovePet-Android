@@ -179,11 +179,6 @@
         <button data-permission="usage">去设置</button>
       </div>
       <div class="permission-row">
-        <strong>通知</strong>
-        <span class="permission-state" id="perm-notifications">正在检查</span>
-        <button data-permission="notifications">去设置</button>
-      </div>
-      <div class="permission-row">
         <strong>动态壁纸</strong>
         <span class="permission-state" id="perm-wallpaper">正在检查</span>
         <button data-permission="wallpaper">去设置</button>
@@ -199,6 +194,7 @@
       <p id="app-prompt-message"></p>
       <form method="dialog" class="prompt-actions">
         <button id="app-prompt-cancel" value="cancel">取消</button>
+        <button id="app-prompt-alternate" value="alternate" hidden></button>
         <button id="app-prompt-confirm" class="primary" value="confirm" autofocus>知道了</button>
       </form>
     </div>
@@ -220,15 +216,23 @@
     <header class="scene-toolbar">
       <button id="scene-back">‹ 返回</button>
       <h2>壁纸设置</h2>
-      <button id="scene-preview" aria-pressed="false">预览</button>
+      <div class="scene-toolbar-actions">
+        <button id="scene-preview" aria-pressed="false">预览</button>
+        <button id="scene-wallpaper-settings" aria-label="动态壁纸权限设置" title="动态壁纸权限设置">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7h7m4 0h5M4 17h3m4 0h9"/>
+            <circle cx="13" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>
+          </svg>
+        </button>
+      </div>
     </header>
     <div class="scene-sheet">
       <div class="scene-scroll">
       <details id="scene-material-section" class="scene-section">
       <summary>素材特效</summary>
       <div class="scene-add">
-        <button id="scene-add-image">添加图片</button>
-        <button id="scene-add-video">添加视频</button>
+        <button id="scene-add-image">＋ 图片</button>
+        <button id="scene-add-video">＋ 视频</button>
         <button id="scene-add-effect">＋ 特效</button>
       </div>
       <div id="scene-choices" hidden><p id="scene-choices-title"></p><div id="scene-choice-grid"></div></div>
@@ -253,6 +257,14 @@
         </div>
       </fieldset>
       </details>
+      <details class="scene-section" id="scene-motion-section">
+        <summary>背景微动</summary>
+        <label class="settings-switch">
+          <strong>陀螺仪</strong>
+          <input type="checkbox" id="scene-tilt" role="switch">
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+      </details>
       <details class="scene-section" id="scene-library-section">
         <summary>壁纸配置</summary>
         <div class="scene-add">
@@ -262,7 +274,7 @@
       </details>
       <p id="scene-message" role="status" hidden></p>
       </div>
-      <button id="scene-apply" class="primary">完成并预览</button>
+      <button id="scene-apply" class="primary">应用壁纸</button>
     </div>
   </section>
   <button id="pet-menu-button" aria-label="桌宠菜单" hidden>⋯</button>
