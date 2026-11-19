@@ -60,6 +60,10 @@ public final class MainActivity extends Activity {
     private ValueCallback<Uri[]> scenePicker;
     private static WeakReference<MainActivity> active = new WeakReference<>(null);
     private final ExecutorService imports = Executors.newSingleThreadExecutor();
+    private final WallpaperManager.OnColorsChangedListener wallpaperListener = (colors, which) -> {
+        updateWallpaperStatus();
+        updatePermissionStatus();
+    };
     private PetWeb player;
     private ModelStore store;
     private FrameLayout frame;
@@ -250,6 +254,11 @@ public final class MainActivity extends Activity {
         player = null;
     }
 
+    @Override protected void onStart() {
+        super.onStart();
+        WallpaperManager.getInstance(this).addOnColorsChangedListener(wallpaperListener, null);
+    }
+
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
@@ -279,7 +288,16 @@ public final class MainActivity extends Activity {
 
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
-        if (focused) showWallpaperSuccess();
+        if (focused) {
+            updateWallpaperStatus();
+            updatePermissionStatus();
+            showWallpaperSuccess();
+        }
+    }
+
+    @Override protected void onStop() {
+        WallpaperManager.getInstance(this).removeOnColorsChangedListener(wallpaperListener);
+        super.onStop();
     }
 
     @Override protected void onDestroy() {
@@ -513,12 +531,7 @@ public final class MainActivity extends Activity {
             PetService.setHomeOnly(this, homeOnly);
             return;
         }
-        try {
-            startActivityForResult(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS), USAGE_ACCESS);
-            awaitingUsageAccess = true;
-        } catch (ActivityNotFoundException | SecurityException error) {
-            player.prompt("使用情况访问", "无法打开系统授权页。", null, null);
-        }
+        awaitingUsageAccess = openUsageAccess(true);
     }
 
     boolean chooseSceneFile(ValueCallback<Uri[]> callback, boolean video) {
@@ -666,34 +679,55 @@ public final class MainActivity extends Activity {
         if (player == null) return;
         WallpaperManager manager = WallpaperManager.getInstance(this);
         String wallpaper = !manager.isWallpaperSupported() ? "unsupported"
-                : !manager.isSetWallpaperAllowed() ? "restricted" : "allowed";
+                : !manager.isSetWallpaperAllowed() ? "restricted"
+                // The OEM permission switch is separate from Android's wallpaper policy.
+                : WallpaperSettingsActivity.usesXiaomiPermissions() ? "system"
+                : hasWallpaper(WallpaperManager.FLAG_SYSTEM) || hasWallpaper(WallpaperManager.FLAG_LOCK)
+                    ? "applied" : "unapplied";
         player.permissionStatus(Settings.canDrawOverlays(this), HomeVisibility.hasUsageAccess(this), wallpaper);
     }
 
     void openPermission(String permission) {
+        if ("usage".equals(permission)) {
+            openUsageAccess(false);
+            return;
+        }
         if ("wallpaper".equals(permission)) {
             if (!openSettingsScreen(new Intent(this, WallpaperSettingsActivity.class)) && player != null) {
                 player.notice(getString(R.string.wallpaper_settings_unavailable));
             }
             return;
         }
+        if (!"overlay".equals(permission)) return;
         Uri appUri = Uri.fromParts("package", getPackageName(), null);
-        Intent appInfo = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, appUri);
-        Intent screen;
-        switch (permission) {
-            case "overlay":
-                screen = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, appUri);
-                break;
-            case "usage":
-                screen = new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS);
-                break;
-            default:
-                return;
-        }
-        if (openSettingsScreen(screen) || (screen != appInfo && openSettingsScreen(appInfo))) return;
+        if (openSettingsScreen(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, appUri))
+                || openSettingsScreen(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, appUri))) return;
         if (player != null) {
             player.prompt("权限配置", "请在系统设置中授权。", null, null);
         }
+    }
+
+    private boolean openUsageAccess(boolean forPlacement) {
+        Uri appUri = Uri.fromParts("package", getPackageName(), null);
+        Intent details = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, appUri);
+        int flags = PackageManager.MATCH_SYSTEM_ONLY | PackageManager.MATCH_DEFAULT_ONLY;
+        ComponentName appDetails = details.resolveActivity(getPackageManager());
+        Intent scoped = new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, appUri);
+        Intent list = new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS);
+        for (Intent intent : new Intent[] {scoped, list}) {
+            ResolveInfo resolved = getPackageManager().resolveActivity(intent, flags);
+            if (resolved == null || resolved.activityInfo == null) continue;
+            ComponentName target = new ComponentName(resolved.activityInfo.packageName, resolved.activityInfo.name);
+            if (target.equals(appDetails)) continue;
+            intent.setComponent(target);
+            if (forPlacement ? launchPicker(intent, USAGE_ACCESS) : openSettingsScreen(intent)) return true;
+        }
+        if (player != null) {
+            player.prompt("使用情况访问",
+                    "请在系统设置中搜索「使用情况访问」，选择 BandoriLovePet 并允许访问。",
+                    "打开系统设置", () -> openSettingsScreen(new Intent(Settings.ACTION_SETTINGS)));
+        }
+        return false;
     }
 
     private boolean openSettingsScreen(Intent intent) {

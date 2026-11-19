@@ -16,6 +16,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Region;
 import android.hardware.display.DisplayManager;
+import android.hardware.input.InputManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.Handler;
@@ -52,10 +53,10 @@ public final class PetService extends Service {
         @Override public void onLowMemory() {}
     };
     private WindowManager.LayoutParams frame;
+    private final boolean fixedWindow = Build.VERSION.SDK_INT >= 33;
     private Rect screen;
     private FrameLayout container;
     private final Rect crop = new Rect();
-    private final Rect laidOutCrop = new Rect();
     private final RectF cropArea = new RectF();
     private final RectF modelArea = new RectF();
     private Region touchRegion = new Region();
@@ -156,6 +157,7 @@ public final class PetService extends Service {
         container = new DragFrame(overlay);
         player.view().setPivotX(0);
         player.view().setPivotY(0);
+        if (fixedWindow) player.view().setLayerType(View.LAYER_TYPE_HARDWARE, null);
         container.addView(player.view(), new FrameLayout.LayoutParams(canvasWidth, canvasHeight));
         container.setVisibility(View.INVISIBLE);
         container.getViewTreeObserver().addOnPreDrawListener(() -> {
@@ -178,8 +180,13 @@ public final class PetService extends Service {
     }
 
     private WindowManager.LayoutParams overlayFrame() {
-        WindowManager.LayoutParams layout = new WindowManager.LayoutParams(1, 1,
+        WindowManager.LayoutParams layout = new WindowManager.LayoutParams(
+                fixedWindow ? displayWidth : 1, fixedWindow ? displayHeight : 1,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, OVERLAY_FLAGS, PixelFormat.TRANSLUCENT);
+        if (fixedWindow) {
+            // Let touches outside the model reach windows from other apps.
+            layout.alpha = getSystemService(InputManager.class).getMaximumObscuringOpacityForTouch();
+        }
         layout.gravity = Gravity.TOP | Gravity.LEFT;
         layout.setFitInsetsTypes(0);
         layout.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
@@ -217,6 +224,7 @@ public final class PetService extends Service {
         int x = canvasX, y = canvasY, width = canvasWidth;
         if (oldDisplayWidth != displayWidth || oldDisplayHeight != displayHeight) {
             ((DragFrame) container).cancelGesture();
+            if (fixedWindow) layoutWindow(0, 0, displayWidth, displayHeight);
             PointF grip = player.touchShape().grip();
             float gx = grip == null ? .5f : grip.x, gy = grip == null ? .54f : grip.y;
             float relativeX = (canvasX + gx * canvasWidth - previous.left) / Math.max(1, previous.width());
@@ -268,7 +276,8 @@ public final class PetService extends Service {
         }
         shape.addControls(touchRegion, canvasWidth, canvasHeight);
         touchRegionDirty = true;
-        updateWindowFrame();
+        if (fixedWindow) container.invalidate();
+        else updateWindowFrame();
     }
 
     private void updateWindowFrame() {
@@ -297,16 +306,17 @@ public final class PetService extends Service {
     }
 
     private void pushTouchRegion() {
-        if (Build.VERSION.SDK_INT < 33) return;
+        if (!fixedWindow) return;
         AttachedSurfaceControl surface = container.getRootSurfaceControl();
         if (surface != null) {
             Region local;
-            if (((DragFrame) container).pinching) {
-                local = new Region(0, 0, container.getWidth(), container.getHeight());
+            if (((DragFrame) container).capturingModel) {
+                // Keep both fingers in the same gesture when the second lands beside the model.
+                local = new Region(0, 0, displayWidth, displayHeight);
             } else {
                 local = new Region(touchRegion);
-                local.op(laidOutCrop, Region.Op.INTERSECT);
-                local.translate(-laidOutCrop.left, -laidOutCrop.top);
+                local.translate(canvasX, canvasY);
+                local.op(0, 0, displayWidth, displayHeight, Region.Op.INTERSECT);
             }
             surface.setTouchableRegion(local);
             touchRegionDirty = false;
@@ -331,6 +341,7 @@ public final class PetService extends Service {
         boolean show = wantedVisible && !settingsOpen;
         if (visible == show) return;
         visible = show;
+        if (!show) ((DragFrame) container).cancelGesture();
         container.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
         updateWindowCrop();
         player.status();
@@ -359,25 +370,24 @@ public final class PetService extends Service {
         canvasWidth = width;
         canvasHeight = height;
         if (container != null) {
-            if (resized && !((DragFrame) container).pinching) syncViewport();
-            if (((DragFrame) container).isMoving()) updateWindowFrame();
-            else updateWindowCrop();
+            boolean moving = ((DragFrame) container).isMoving();
+            if (fixedWindow) positionViewport();
+            else {
+                if (resized && !moving) syncViewport();
+                if (moving) updateWindowFrame();
+            }
+            if (!moving) updateWindowCrop();
         }
     }
 
     private void positionViewport() {
         View view = player.view();
         if (view.getWidth() == 0 || view.getHeight() == 0) return;
-        boolean offsetChanged = !laidOutCrop.equals(crop);
-        laidOutCrop.set(crop);
-        // Apply the crop and scale at draw time, using the WebView size that was actually laid out.
-        // On pinch release the old WebView stays scaled until its new layout is ready.
-        view.setTranslationX(-crop.left);
-        view.setTranslationY(-crop.top);
+        view.setTranslationX(fixedWindow ? canvasX : -crop.left);
+        view.setTranslationY(fixedWindow ? canvasY : -crop.top);
         view.setScaleX(canvasWidth / (float) view.getWidth());
         view.setScaleY(canvasHeight / (float) view.getHeight());
-        if (offsetChanged) touchRegionDirty = true;
-        if (touchRegionDirty) pushTouchRegion();
+        if (touchRegionDirty && !((DragFrame) container).isMoving()) pushTouchRegion();
     }
 
     private void syncViewport() {
@@ -447,7 +457,9 @@ public final class PetService extends Service {
         private int windowY;
         private boolean dragging;
         private boolean pinching;
+        private boolean dragFromPinch;
         private boolean controlsGesture;
+        private boolean capturingModel;
         private boolean ignoreGesture;
         private int firstFinger;
         private int secondFinger;
@@ -460,12 +472,17 @@ public final class PetService extends Service {
 
         DragFrame(Context context) {
             super(context);
-            slop = ViewConfiguration.get(context).getScaledTouchSlop();
+            slop = Math.max(1, ViewConfiguration.get(context).getScaledTouchSlop() / 2);
         }
 
         private boolean isMoving() { return dragging || pinching; }
 
         private void queueFrame(int x, int y, int width) {
+            if (fixedWindow) {
+                // MotionEvent already contains the latest batched input for this frame.
+                place(x, y, width);
+                return;
+            }
             nextX = x;
             nextY = y;
             nextWidth = width;
@@ -481,13 +498,13 @@ public final class PetService extends Service {
             place(nextX, nextY, nextWidth);
         }
 
-        private void beginPinch(MotionEvent event) {
+        private void beginPinch(MotionEvent event, int first, int second) {
             removeCallbacks(drawFrame);
             applyFrame();
-            firstFinger = event.getPointerId(0);
-            secondFinger = event.getPointerId(event.getActionIndex());
-            float x = event.getRawX(0), y = event.getRawY(0);
-            float otherX = event.getRawX(event.getActionIndex()), otherY = event.getRawY(event.getActionIndex());
+            firstFinger = event.getPointerId(first);
+            secondFinger = event.getPointerId(second);
+            float x = event.getRawX(first), y = event.getRawY(first);
+            float otherX = event.getRawX(second), otherY = event.getRawY(second);
             initialSpan = Math.max(1, (float) Math.hypot(x - otherX, y - otherY));
             initialWidth = canvasWidth;
             anchorX = ((x + otherX) / 2 - canvasX) / canvasWidth;
@@ -510,18 +527,42 @@ public final class PetService extends Service {
         private void resetGesture() {
             removeCallbacks(drawFrame);
             applyFrame();
-            boolean wasPinching = pinching;
-            dragging = pinching = controlsGesture = false;
-            if (wasPinching) {
-                syncViewport();
-                player.pinching(false);
+            if (isMoving()) {
+                if (!fixedWindow) syncViewport();
+                player.manipulating(false, fixedWindow ? canvasWidth / (float) player.view().getWidth() : 1);
             }
+            dragging = pinching = dragFromPinch = controlsGesture = false;
+        }
+
+        private void reanchorDrag(MotionEvent event, int pointer) {
+            startX = event.getRawX(pointer);
+            startY = event.getRawY(pointer);
+            windowX = canvasX;
+            windowY = canvasY;
+        }
+
+        private void liftPinchFinger(MotionEvent event) {
+            int lifted = event.getActionIndex();
+            int id = event.getPointerId(lifted);
+            if (id != firstFinger && id != secondFinger) return;
+            int remaining = event.findPointerIndex(id == firstFinger ? secondFinger : firstFinger);
+            for (int i = 0; i < event.getPointerCount(); i++) {
+                if (i == remaining || i == lifted) continue;
+                beginPinch(event, remaining, i);
+                return;
+            }
+            removeCallbacks(drawFrame);
+            applyFrame();
+            pinching = false;
+            dragging = dragFromPinch = true;
+            reanchorDrag(event, remaining);
         }
 
         private void cancelGesture() {
             removeCallbacks(drawFrame);
             framePending = false;
             resetGesture();
+            capturingModel = false;
             ignoreGesture = true;
         }
 
@@ -533,50 +574,59 @@ public final class PetService extends Service {
                 return true;
             }
             if (action == MotionEvent.ACTION_DOWN) {
-                controlsGesture = player.touchShape().hitsControls((event.getX() + laidOutCrop.left) / canvasWidth,
-                        (event.getY() + laidOutCrop.top) / canvasHeight);
-                dragging = pinching = false;
-                startX = event.getRawX();
-                startY = event.getRawY();
-                windowX = canvasX;
-                windowY = canvasY;
+                float localX = event.getX() + (fixedWindow ? -canvasX : crop.left);
+                float localY = event.getY() + (fixedWindow ? -canvasY : crop.top);
+                controlsGesture = player.touchShape().hitsControls(localX / canvasWidth, localY / canvasHeight);
+                dragging = pinching = dragFromPinch = false;
+                reanchorDrag(event, 0);
+                if (!controlsGesture && fixedWindow) {
+                    capturingModel = true;
+                    pushTouchRegion();
+                }
             }
             if (controlsGesture) {
                 if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) controlsGesture = false;
                 return super.dispatchTouchEvent(event);
             }
             if (action == MotionEvent.ACTION_POINTER_DOWN && !pinching) {
-                if (!dragging) cancelChild(event);
+                if (!dragging) {
+                    cancelChild(event);
+                    player.manipulating(true, 1);
+                }
                 pinching = true;
-                beginPinch(event);
-                player.pinching(true);
+                beginPinch(event, 0, event.getActionIndex());
             }
-            if (pinching && action == MotionEvent.ACTION_MOVE) {
+            if (pinching && action == MotionEvent.ACTION_POINTER_UP) {
+                liftPinchFinger(event);
+            } else if (pinching && action == MotionEvent.ACTION_MOVE) {
                 movePinch(event);
             } else if (!pinching && action == MotionEvent.ACTION_MOVE) {
                 float dx = event.getRawX() - startX;
                 float dy = event.getRawY() - startY;
-                if (!dragging) {
-                    float distance = (float) Math.hypot(dx, dy);
-                    if (distance > slop) {
-                        cancelChild(event);
-                        dragging = true;
-                        // Keep the avatar still within touch slop without jumping by that distance.
-                        startX += dx * slop / distance;
-                        startY += dy * slop / distance;
-                        dx = event.getRawX() - startX;
-                        dy = event.getRawY() - startY;
-                    }
+                float distance = (float) Math.hypot(dx, dy);
+                if (!dragging && distance > slop) {
+                    cancelChild(event);
+                    dragging = true;
+                    player.manipulating(true, 1);
                 }
-                if (dragging) queueFrame(windowX + Math.round(dx), windowY + Math.round(dy), canvasWidth);
+                if (dragging) {
+                    // Taper the dead zone away, so the grabbed point catches up to the finger.
+                    float follow = dragFromPinch || distance >= 2 * slop ? 1
+                            : Math.max(0, 2 * (distance - slop)) / Math.max(1, distance);
+                    queueFrame(windowX + Math.round(dx * follow), windowY + Math.round(dy * follow), canvasWidth);
+                }
             }
-            if (!dragging && !pinching) return super.dispatchTouchEvent(event);
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                resetGesture();
-                updateWindowCrop();
-                savePlacement();
+                capturingModel = false;
+                if (isMoving()) {
+                    resetGesture();
+                    updateWindowCrop();
+                    savePlacement();
+                    return true;
+                }
+                pushTouchRegion();
             }
-            return true;
+            return isMoving() || super.dispatchTouchEvent(event) || capturingModel;
         }
 
         private void cancelChild(MotionEvent event) {

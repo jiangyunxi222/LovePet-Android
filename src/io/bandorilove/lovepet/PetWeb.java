@@ -364,7 +364,9 @@ final class PetWeb {
                 + PetService.homeOnly(context) + ")");
     }
     void progress(boolean busy) { evaluate("window.importProgress?.(" + busy + ")"); }
-    void pinching(boolean active) { evaluate("window.setPetPinching?.(" + active + ")"); }
+    void manipulating(boolean active, float scale) {
+        evaluate("window.setPetManipulating?.(" + active + "," + scale + ")");
+    }
     void error(String text) { evaluate("window.reportError?.(" + JSONObject.quote(text) + ")"); }
     void receive(JSONObject command, boolean sound) {
         evaluate("window.receiveCommand?.(" + command + "," + sound + ")");

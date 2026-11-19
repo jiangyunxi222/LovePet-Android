@@ -151,9 +151,11 @@ window.setPermissionStatus = (overlay, usage, wallpaperMode) => {
     status.dataset.status = granted ? "allowed" : "off";
     status.textContent = granted ? "已开启" : "未开启";
   }
-  const wallpaperState = { allowed: "已开启", system: "系统授权", unsupported: "不支持", restricted: "未开启" };
+  const wallpaperState = {
+    applied: "已应用", unapplied: "未应用", system: "系统中查看", unsupported: "不支持", restricted: "未开启",
+  };
   $("#perm-wallpaper").textContent = wallpaperState[wallpaperMode] || wallpaperState.system;
-  $("#perm-wallpaper").dataset.status = wallpaperMode === "allowed" ? "allowed" : "off";
+  $("#perm-wallpaper").dataset.status = wallpaperMode === "applied" ? "allowed" : "off";
 };
 
 function updateControlsVisibility() {
@@ -358,10 +360,11 @@ function makeRenderer() {
   const [maxWidth, maxHeight] = Array.from(context.getParameter(context.MAX_VIEWPORT_DIMS), value => Math.min(value, maxSide));
   const anisotropy = context.getExtension("EXT_texture_filter_anisotropic");
   const anisotropyLevel = anisotropy ? Math.min(4, context.getParameter(anisotropy.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) : 0;
-  const isEnlarged = (width) => pet ? width * (devicePixelRatio || 1) >= 640
+  let petPixelScale = 1;
+  const isEnlarged = (width) => pet ? width * (devicePixelRatio || 1) * petPixelScale >= 640
     : (view.sceneCharacterTransform?.scale ?? 1) >= 1.25;
   function resolutionFor(width, height, enlarged) {
-    const nativeResolution = devicePixelRatio || 1;
+    const nativeResolution = (devicePixelRatio || 1) * petPixelScale;
     // Bound the extra framebuffer area on high-resolution screens.
     const target = enlarged ? Math.min(nativeResolution * 1.25,
       Math.sqrt(nativeResolution ** 2 + 1_200_000 / (width * height))) : nativeResolution;
@@ -379,12 +382,17 @@ function makeRenderer() {
   let pinching = false;
   let resizeTimer;
   let qualityTimer;
+  let lastRender = 0;
   let enlarged = isEnlarged(stage.clientWidth);
   const readAlpha = makeAlphaSampler(canvas);
   const sampleTouchMask = pet ? makeTouchSampler(readAlpha) : null;
   const ticker = PIXI.Ticker.shared;
   ticker.add(() => {
     if ((wallpaper && !wallpaperVisible) || (!wallpaper && document.hidden)) return;
+    const now = performance.now();
+    // Leave GPU time for Android to composite the position and scale at the display refresh rate.
+    if (pet && pinching && now - lastRender < 32) return;
+    lastRender = now;
     renderer.render(contents);
     if (sampleTouchMask && overlayVisible && view.model && !pinching) sampleTouchMask(view.model);
   }, undefined, PIXI.UPDATE_PRIORITY.LOW);
@@ -414,7 +422,7 @@ function makeRenderer() {
     if (pinching) return;
     const { clientWidth: width, clientHeight: height } = stage;
     if (!width || !height) return;
-    if (!pinching) enlarged = isEnlarged(width);
+    enlarged = isEnlarged(width);
     const resolution = resolutionFor(width, height, enlarged);
     const layoutChanged = Math.abs(renderer.screen.width - width) >= 1 ||
         Math.abs(renderer.screen.height - height) >= 1;
@@ -439,15 +447,17 @@ function makeRenderer() {
   function scheduleCanvasSync() {
     if (pet) {
       clearTimeout(resizeTimer);
-      // CSS scales the existing transparent frame while Android tracks two fingers.
       if (!pinching) resizeTimer = setTimeout(syncCanvas, 80);
     } else syncCanvas();
   }
-  if (pet) window.setPetPinching = (active) => {
+  if (pet) window.setPetManipulating = (active, scale) => {
     pinching = active;
     clearTimeout(resizeTimer);
     clearTimeout(qualityTimer);
-    scheduleCanvasSync();
+    if (active) return;
+    // Keep the CSS viewport and model transform fixed. Refresh only the pixel density after zoom.
+    petPixelScale = Math.max(.125, Math.ceil(scale * 8) / 8);
+    resizeTimer = setTimeout(syncCanvas, 220);
   };
   const resize = new ResizeObserver(() => {
     scheduleCanvasSync();
