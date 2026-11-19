@@ -959,27 +959,35 @@ function endPreviewPress() {
   clearTimeout(previewPress?.timer);
   previewPress = undefined;
 }
+function openPreviewMenu(press) {
+  if (press.opened) return;
+  const coordinates = avatarCoordinates({ clientX: press.x, clientY: press.y });
+  if (coordinates && avatarOpaque(coordinates)) {
+    press.opened = true;
+    showPetMenu(true);
+  }
+}
 avatarCanvas.addEventListener("pointerdown", (event) => {
   endPreviewPress();
   const root = document.documentElement;
   if (event.pointerType !== "touch" || !event.isPrimary || !root.classList.contains("immersive-preview") ||
       (root.classList.contains("scene-edit") && !root.classList.contains("scene-preview"))) return;
-  const press = { id: event.pointerId, x: event.clientX, y: event.clientY, opened: false };
+  const press = { id: event.pointerId, x: event.clientX, y: event.clientY, started: event.timeStamp, opened: false };
   // Android can suppress click after a long touch, so open the menu while it is held.
-  press.timer = setTimeout(() => {
-    const coordinates = avatarCoordinates(event);
-    if (coordinates && avatarOpaque(coordinates)) {
-      press.opened = true;
-      showPetMenu(true);
-    }
-  }, 450);
+  press.timer = setTimeout(() => openPreviewMenu(press), 450);
   previewPress = press;
 });
 avatarCanvas.addEventListener("pointermove", (event) => {
   if (previewPress && event.pointerId === previewPress.id &&
       Math.hypot(event.clientX - previewPress.x, event.clientY - previewPress.y) > 12) endPreviewPress();
 });
-avatarCanvas.addEventListener("pointerup", () => clearTimeout(previewPress?.timer));
+avatarCanvas.addEventListener("pointerup", (event) => {
+  const press = previewPress;
+  if (!press || event.pointerId !== press.id) return;
+  clearTimeout(press.timer);
+  // A slow render can defer the timer until Android has delivered pointerup.
+  if (event.timeStamp - press.started >= 450) openPreviewMenu(press);
+});
 avatarCanvas.addEventListener("pointercancel", endPreviewPress);
 avatarCanvas.addEventListener("contextmenu", (event) => { if (previewPress) event.preventDefault(); });
 avatarCanvas.onclick = (event) => {
