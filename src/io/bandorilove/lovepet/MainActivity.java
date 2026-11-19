@@ -18,6 +18,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.Settings;
@@ -55,7 +56,6 @@ public final class MainActivity extends Activity {
     private static final int WALLPAPER_RESTORE_SETTINGS = 11;
     private static final int WALLPAPER_RESTORE_PHOTO = 12;
     private static final long WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS = 1500;
-    private static final String WALLPAPER_PERMISSION_HINT = "若有「动态壁纸服务」权限，请开启。";
     private static final String SYSTEM_PHOTO_PICKER = "androidx.activity.result.contract.action.PICK_IMAGES";
     private ValueCallback<Uri[]> scenePicker;
     private static WeakReference<MainActivity> active = new WeakReference<>(null);
@@ -80,6 +80,8 @@ public final class MainActivity extends Activity {
     private int wallpaperPicker;
     private int wallpaperPickerAttempt;
     private boolean wallpaperPickerPaused;
+    private boolean wallpaperPreviewShown;
+    private long wallpaperPickerStarted;
     private boolean wallpaperChanging;
     private boolean wallpaperSuccessPending;
     private boolean wallpaperSuccessSent;
@@ -98,6 +100,8 @@ public final class MainActivity extends Activity {
             pendingDocument = saved.getParcelable("pendingDocument");
             wallpaperPicker = saved.getInt("wallpaperPicker");
             wallpaperPickerPaused = wallpaperChanging = externalPicker = wallpaperPicker != 0;
+            wallpaperPreviewShown = saved.getBoolean("wallpaperPreviewShown");
+            wallpaperPickerStarted = saved.getLong("wallpaperPickerStarted");
             wallpaperSuccessPending = saved.getBoolean("wallpaperSuccessPending");
             wallpaperApplyAwaitingResult = saved.getBoolean("wallpaperApplyAwaitingResult");
             wallpaperSuccessId = saved.getLong("wallpaperSuccessId");
@@ -292,6 +296,10 @@ public final class MainActivity extends Activity {
             updateWallpaperStatus();
             updatePermissionStatus();
             showWallpaperSuccess();
+            if (wallpaperPickerStayedInApp(wallpaperPicker)
+                    && SystemClock.uptimeMillis() - wallpaperPickerStarted >= WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS) {
+                handleUnopenedWallpaperPicker(wallpaperPicker);
+            }
         }
     }
 
@@ -325,6 +333,8 @@ public final class MainActivity extends Activity {
         super.onSaveInstanceState(state);
         state.putParcelable("pendingDocument", pendingDocument);
         state.putInt("wallpaperPicker", wallpaperPicker);
+        state.putBoolean("wallpaperPreviewShown", wallpaperPreviewShown);
+        state.putLong("wallpaperPickerStarted", wallpaperPickerStarted);
         state.putBoolean("wallpaperSuccessPending", wallpaperSuccessPending);
         state.putBoolean("wallpaperApplyAwaitingResult", wallpaperApplyAwaitingResult);
         state.putLong("wallpaperSuccessId", wallpaperSuccessId);
@@ -582,14 +592,11 @@ public final class MainActivity extends Activity {
             return;
         }
         WallpaperManager manager = WallpaperManager.getInstance(this);
-        if (!manager.isWallpaperSupported()) {
-            updateWallpaperStatus();
-            wallpaperMessage("系统不支持动态壁纸。");
-            return;
-        }
         wallpaperApplyAwaitingResult = true;
         wallpaperSuccessPending = wallpaperSuccessSent = false;
-        if (applied) {
+        boolean supported = manager.isWallpaperSupported();
+        boolean allowed = supported && manager.isSetWallpaperAllowed();
+        if (applied && allowed) {
             // The editor has already published its scene to the independent desktop process.
             wallpaperChanging = false;
             updateWallpaperStatus();
@@ -597,12 +604,12 @@ public final class MainActivity extends Activity {
             completeWallpaperApply();
             return;
         }
-        wallpaperRecovery.rememberPrevious(manager.getWallpaperId(WallpaperManager.FLAG_SYSTEM),
-                wallpaperComponent(WallpaperManager.FLAG_SYSTEM));
-        // Try the direct confirmation on every brand. Fall back only when it actually fails.
-        if (manager.isSetWallpaperAllowed()
-                && launchWallpaperPicker(wallpaperPreview(new ComponentName(this, PetWallpaperService.class)),
-                        WALLPAPER_PREVIEW)) return;
+        if (supported && !applied) {
+            wallpaperRecovery.rememberPrevious(manager.getWallpaperId(WallpaperManager.FLAG_SYSTEM),
+                    wallpaperComponent(WallpaperManager.FLAG_SYSTEM));
+        }
+        if (allowed && launchWallpaperPicker(wallpaperPreview(new ComponentName(this, PetWallpaperService.class)),
+                WALLPAPER_PREVIEW)) return;
         openWallpaperList();
     }
 
@@ -627,6 +634,8 @@ public final class MainActivity extends Activity {
         int attempt = ++wallpaperPickerAttempt;
         wallpaperPicker = request;
         wallpaperPickerPaused = false;
+        wallpaperPreviewShown = false;
+        wallpaperPickerStarted = SystemClock.uptimeMillis();
         wallpaperChanging = externalPicker = true;
         setSettingsVisible(settingsVisible);
         updateWallpaperStatus();
@@ -652,22 +661,33 @@ public final class MainActivity extends Activity {
     }
 
     private boolean wallpaperPickerStayedInApp(int request) {
-        return wallpaperPicker == request && !wallpaperPickerPaused && resumed && hasWindowFocus()
+        return request >= WALLPAPER_PREVIEW && request <= WALLPAPER_SETTINGS
+                && wallpaperPicker == request && !wallpaperPickerPaused && resumed && hasWindowFocus()
                 && !isFinishing() && !isDestroyed();
     }
 
     private void handleUnopenedWallpaperPicker(int request) {
         resetWallpaperPicker();
         if (request == WALLPAPER_PREVIEW) openWallpaperList();
-        else if (request == WALLPAPER_LIST) offerWallpaperSettings();
-        else wallpaperMessage(getString(R.string.wallpaper_help_manual_picker));
+        else offerWallpaperPermission();
+    }
+
+    static void wallpaperPreviewVisible() {
+        MainActivity current = active.get();
+        if (current != null && current.wallpaperPicker == WALLPAPER_PREVIEW) current.wallpaperPreviewShown = true;
     }
 
     private void finishWallpaperPicker(int request, boolean confirmed) {
         if (isDestroyed() || wallpaperPicker != request) return;
-        if (!confirmed && request <= WALLPAPER_SETTINGS && wallpaperPickerStayedInApp(request)) {
-            handleUnopenedWallpaperPicker(request);
-            return;
+        if (!confirmed && request <= WALLPAPER_SETTINGS && !hasWallpaper(WallpaperManager.FLAG_SYSTEM)) {
+            boolean returnedImmediately = SystemClock.uptimeMillis() - wallpaperPickerStarted < WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS;
+            boolean failedToOpen = request == WALLPAPER_PREVIEW
+                    ? !wallpaperPreviewShown || !WallpaperManager.getInstance(this).isSetWallpaperAllowed()
+                    : !wallpaperPickerPaused || returnedImmediately;
+            if (failedToOpen) {
+                handleUnopenedWallpaperPicker(request);
+                return;
+            }
         }
         wallpaperPicker = 0;
         externalPicker = false;
@@ -742,18 +762,18 @@ public final class MainActivity extends Activity {
 
     private void openWallpaperList() {
         if (!launchWallpaperPicker(new Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER), WALLPAPER_LIST)) {
-            offerWallpaperSettings();
+            offerWallpaperPermission();
         }
     }
 
-    private void offerWallpaperSettings() {
-        if (player == null) return;
-        player.prompt("设置主屏幕壁纸", "无法直接打开动态壁纸列表。请在系统壁纸中选择「"
-                + getString(R.string.wallpaper_label) + "」。", getString(R.string.wallpaper_open_picker), () -> {
-                    if (!launchWallpaperPicker(new Intent(Intent.ACTION_SET_WALLPAPER), WALLPAPER_SETTINGS)) {
-                        wallpaperMessage(getString(R.string.wallpaper_help_manual_picker));
-                    }
-                });
+    private void offerWallpaperPermission() {
+        wallpaperApplyAwaitingResult = false;
+        updatePermissionStatus();
+        if (player != null) {
+            player.prompt("动态壁纸权限配置", "系统未能应用动态壁纸。请在权限配置中检查动态壁纸服务。"
+                    + "若系统提供「动态壁纸服务」开关，请开启后重试。",
+                    "权限配置", () -> openPermission("wallpaper"));
+        }
     }
 
     private void exitWallpaper() {
@@ -897,17 +917,19 @@ public final class MainActivity extends Activity {
             } else if (player != null) player.notice("已恢复主屏幕壁纸");
             return;
         }
-        if (wanted) wallpaperApplyAwaitingResult = false;
-        if (player == null || !confirmed) return;
+        if (player == null || !confirmed) {
+            if (wanted) wallpaperApplyAwaitingResult = false;
+            return;
+        }
         if (!wanted) {
             if (request == WALLPAPER_RESTORE_SETTINGS) wallpaperMessage("原壁纸未恢复。");
             else offerWallpaperRestore();
         } else if (hasWallpaper(WallpaperManager.FLAG_LOCK)) {
             player.prompt("只设置了锁屏", "请再选择「主屏幕」。", "打开壁纸列表", this::openWallpaperList);
-        } else if (!WallpaperManager.getInstance(this).isSetWallpaperAllowed()) {
-            player.prompt("壁纸未应用", WALLPAPER_PERMISSION_HINT, "去设置", () -> openPermission("wallpaper"));
+        } else if (request == WALLPAPER_PREVIEW) {
+            openWallpaperList();
         } else {
-            wallpaperMessage("壁纸未应用，请重试。");
+            offerWallpaperPermission();
         }
     }
 

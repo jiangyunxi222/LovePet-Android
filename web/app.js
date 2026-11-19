@@ -360,11 +360,10 @@ function makeRenderer() {
   const [maxWidth, maxHeight] = Array.from(context.getParameter(context.MAX_VIEWPORT_DIMS), value => Math.min(value, maxSide));
   const anisotropy = context.getExtension("EXT_texture_filter_anisotropic");
   const anisotropyLevel = anisotropy ? Math.min(4, context.getParameter(anisotropy.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) : 0;
-  let petPixelScale = 1;
-  const isEnlarged = (width) => pet ? width * (devicePixelRatio || 1) * petPixelScale >= 640
+  const isEnlarged = (width) => pet ? width * (devicePixelRatio || 1) >= 640
     : (view.sceneCharacterTransform?.scale ?? 1) >= 1.25;
   function resolutionFor(width, height, enlarged) {
-    const nativeResolution = (devicePixelRatio || 1) * petPixelScale;
+    const nativeResolution = devicePixelRatio || 1;
     // Bound the extra framebuffer area on high-resolution screens.
     const target = enlarged ? Math.min(nativeResolution * 1.25,
       Math.sqrt(nativeResolution ** 2 + 1_200_000 / (width * height))) : nativeResolution;
@@ -382,17 +381,14 @@ function makeRenderer() {
   let pinching = false;
   let resizeTimer;
   let qualityTimer;
-  let lastRender = 0;
   let enlarged = isEnlarged(stage.clientWidth);
   const readAlpha = makeAlphaSampler(canvas);
   const sampleTouchMask = pet ? makeTouchSampler(readAlpha) : null;
   const ticker = PIXI.Ticker.shared;
   ticker.add(() => {
     if ((wallpaper && !wallpaperVisible) || (!wallpaper && document.hidden)) return;
-    const now = performance.now();
-    // Leave GPU time for Android to composite the position and scale at the display refresh rate.
-    if (pet && pinching && now - lastRender < 32) return;
-    lastRender = now;
+    // While fingers resize the desktop viewport, composite the preserved frame without a GPU redraw.
+    if (pet && pinching) return;
     renderer.render(contents);
     if (sampleTouchMask && overlayVisible && view.model && !pinching) sampleTouchMask(view.model);
   }, undefined, PIXI.UPDATE_PRIORITY.LOW);
@@ -419,10 +415,9 @@ function makeRenderer() {
     syncMask(model);
   }
   function syncCanvas() {
-    if (pinching) return;
     const { clientWidth: width, clientHeight: height } = stage;
     if (!width || !height) return;
-    enlarged = isEnlarged(width);
+    if (!pinching) enlarged = isEnlarged(width);
     const resolution = resolutionFor(width, height, enlarged);
     const layoutChanged = Math.abs(renderer.screen.width - width) >= 1 ||
         Math.abs(renderer.screen.height - height) >= 1;
@@ -447,17 +442,13 @@ function makeRenderer() {
   function scheduleCanvasSync() {
     if (pet) {
       clearTimeout(resizeTimer);
+      // CSS scales the existing transparent frame while Android tracks two fingers.
       if (!pinching) resizeTimer = setTimeout(syncCanvas, 80);
     } else syncCanvas();
   }
-  if (pet) window.setPetManipulating = (active, scale) => {
+  if (pet) window.setPetPinching = (active) => {
     pinching = active;
-    clearTimeout(resizeTimer);
-    clearTimeout(qualityTimer);
-    if (active) return;
-    // Keep the CSS viewport and model transform fixed. Refresh only the pixel density after zoom.
-    petPixelScale = Math.max(.125, Math.ceil(scale * 8) / 8);
-    resizeTimer = setTimeout(syncCanvas, 220);
+    scheduleCanvasSync();
   };
   const resize = new ResizeObserver(() => {
     scheduleCanvasSync();

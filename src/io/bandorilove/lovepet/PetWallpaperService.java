@@ -193,6 +193,7 @@ public final class PetWallpaperService extends WallpaperService {
         }
 
         @Override public void onVisibilityChanged(boolean visible) {
+            if (visible && !this.visible && isPreview()) DesktopRuntime.signal("wallpaper-preview-visible");
             this.visible = visible;
             main.removeCallbacks(pauseHiddenRenderer);
             if (!visible) {

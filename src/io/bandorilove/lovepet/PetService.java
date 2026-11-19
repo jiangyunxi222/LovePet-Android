@@ -5,7 +5,6 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
-import android.content.ComponentCallbacks;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
@@ -16,10 +15,9 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Region;
 import android.hardware.display.DisplayManager;
-import android.hardware.input.InputManager;
 import android.os.Build;
-import android.os.IBinder;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
 import android.view.*;
@@ -37,7 +35,6 @@ public final class PetService extends Service {
     private static volatile PetService active;
     private PetWeb player;
     private WindowManager window;
-    private Context overlayContext;
     private DisplayManager displays;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable refreshDisplay = this::refreshDisplayBounds;
@@ -48,19 +45,12 @@ public final class PetService extends Service {
             if (id == Display.DEFAULT_DISPLAY) scheduleDisplayRefresh();
         }
     };
-    private final ComponentCallbacks overlayConfiguration = new ComponentCallbacks() {
-        @Override public void onConfigurationChanged(Configuration configuration) { scheduleDisplayRefresh(); }
-        @Override public void onLowMemory() {}
-    };
     private WindowManager.LayoutParams frame;
-    private final boolean fixedWindow = Build.VERSION.SDK_INT >= 33;
     private Rect screen;
     private FrameLayout container;
     private final Rect crop = new Rect();
     private final RectF cropArea = new RectF();
-    private final RectF modelArea = new RectF();
     private Region touchRegion = new Region();
-    private boolean touchRegionDirty = true;
     private int canvasX, canvasY, canvasWidth, canvasHeight;
     private int displayWidth, displayHeight;
     private SharedPreferences saved;
@@ -138,14 +128,13 @@ public final class PetService extends Service {
         Display display = displays.getDisplay(Display.DEFAULT_DISPLAY);
         Context overlay = createDisplayContext(display).createWindowContext(
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
-        overlayContext = overlay;
         window = overlay.getSystemService(WindowManager.class);
         saved = getSharedPreferences("overlay", MODE_PRIVATE);
         readScreenBounds();
         frame = overlayFrame();
         int width = saved.getInt("width", dp(190));
         if (!saved.getBoolean("fixedAspect", false) && width > shortSide()) {
-            // Convert legacy landscape widths, which represented a much wider canvas.
+            // An old landscape placement used display-width units.
             float ratio = shortSide() / (float) longSide();
             width = Math.round(width * ratio * ratio);
         }
@@ -155,23 +144,12 @@ public final class PetService extends Service {
         place(saved.getInt("x", screen.right - width),
                 saved.getInt("y", screen.bottom - heightForWidth(width) - dp(60)), width);
         container = new DragFrame(overlay);
-        player.view().setPivotX(0);
-        player.view().setPivotY(0);
-        if (fixedWindow) player.view().setLayerType(View.LAYER_TYPE_HARDWARE, null);
         container.addView(player.view(), new FrameLayout.LayoutParams(canvasWidth, canvasHeight));
         container.setVisibility(View.INVISIBLE);
-        container.getViewTreeObserver().addOnPreDrawListener(() -> {
-            positionViewport();
-            return true;
-        });
+        container.addOnLayoutChangeListener((v, l, t, r, b, previousL, previousT, previousR, previousB) -> pushTouchRegion());
         player.onTouchShapeChanged(this::updateWindowCrop);
         window.addView(container, frame);
-        overlay.registerComponentCallbacks(overlayConfiguration);
         displays.registerDisplayListener(displayListener, main);
-        container.setOnApplyWindowInsetsListener((view, insets) -> {
-            scheduleDisplayRefresh();
-            return insets;
-        });
         updateWindowCrop();
         active = this;
         configureVisibility(homeOnly(this));
@@ -180,13 +158,8 @@ public final class PetService extends Service {
     }
 
     private WindowManager.LayoutParams overlayFrame() {
-        WindowManager.LayoutParams layout = new WindowManager.LayoutParams(
-                fixedWindow ? displayWidth : 1, fixedWindow ? displayHeight : 1,
+        WindowManager.LayoutParams layout = new WindowManager.LayoutParams(1, 1,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, OVERLAY_FLAGS, PixelFormat.TRANSLUCENT);
-        if (fixedWindow) {
-            // Let touches outside the model reach windows from other apps.
-            layout.alpha = getSystemService(InputManager.class).getMaximumObscuringOpacityForTouch();
-        }
         layout.gravity = Gravity.TOP | Gravity.LEFT;
         layout.setFitInsetsTypes(0);
         layout.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
@@ -194,8 +167,7 @@ public final class PetService extends Service {
     }
 
     private void readScreenBounds() {
-        // A cropped overlay's context can still describe the previous orientation.
-        // Query the display area afresh, independently of that overlay window.
+        // A cropped floating window can still report metrics from its previous orientation.
         Display display = displays.getDisplay(Display.DEFAULT_DISPLAY);
         WindowMetrics metrics = createDisplayContext(display).getSystemService(WindowManager.class)
                 .getMaximumWindowMetrics();
@@ -207,66 +179,30 @@ public final class PetService extends Service {
         screen = new Rect(insets.left, insets.top, displayWidth - insets.right, displayHeight - insets.bottom);
     }
 
-    private void scheduleDisplayRefresh() {
-        if (container == null) return;
-        main.removeCallbacks(refreshDisplay);
-        main.post(refreshDisplay);
-        // Window contexts and display information need not update in the same callback.
-        main.postDelayed(refreshDisplay, 120);
-    }
-
-    private void refreshDisplayBounds() {
-        if (container == null || !container.isAttachedToWindow()) return;
-        Rect previous = new Rect(screen);
-        int oldDisplayWidth = displayWidth, oldDisplayHeight = displayHeight;
-        readScreenBounds();
-        if (previous.equals(screen) && oldDisplayWidth == displayWidth && oldDisplayHeight == displayHeight) return;
-        int x = canvasX, y = canvasY, width = canvasWidth;
-        if (oldDisplayWidth != displayWidth || oldDisplayHeight != displayHeight) {
-            ((DragFrame) container).cancelGesture();
-            if (fixedWindow) layoutWindow(0, 0, displayWidth, displayHeight);
-            PointF grip = player.touchShape().grip();
-            float gx = grip == null ? .5f : grip.x, gy = grip == null ? .54f : grip.y;
-            float relativeX = (canvasX + gx * canvasWidth - previous.left) / Math.max(1, previous.width());
-            float relativeY = (canvasY + gy * canvasHeight - previous.top) / Math.max(1, previous.height());
-            width = limitWidth(width);
-            x = Math.round(screen.left + relativeX * screen.width() - gx * width);
-            y = Math.round(screen.top + relativeY * screen.height() - gy * heightForWidth(width));
-        }
-        place(x, y, width);
-        if (!((DragFrame) container).isMoving()) updateWindowCrop();
-        savePlacement();
-    }
-
-    private void savePlacement() {
-        saved.edit().putInt("x", canvasX).putInt("y", canvasY).putInt("width", canvasWidth)
-                .putBoolean("fixedAspect", true).apply();
-    }
-
-    private int shortSide() { return Math.min(displayWidth, displayHeight); }
-    private int longSide() { return Math.max(displayWidth, displayHeight); }
-
     private int limitWidth(int width) {
         return Math.min(shortSide(), Math.max(dp(96), width));
     }
 
     private int heightForWidth(int width) {
+        // Rotating the display moves the model without changing its viewport aspect or size.
         return Math.round(width * (longSide() / (float) shortSide()));
     }
 
+    private int shortSide() { return Math.min(displayWidth, displayHeight); }
+    private int longSide() { return Math.max(displayWidth, displayHeight); }
+
     private void updateWindowCrop() {
         if (container == null || !container.isAttachedToWindow()) return;
-        if (((DragFrame) container).isMoving()) return;
+        if (((DragFrame) container).pinching) return;
         PetTouchShape shape = player.touchShape();
         touchRegion = shape.modelRegion(canvasWidth, canvasHeight, dp(2));
         Rect model = touchRegion.getBounds();
         if (!model.isEmpty()) {
-            modelArea.set(model.left / (float) canvasWidth, model.top / (float) canvasHeight,
+            RectF visible = new RectF(model.left / (float) canvasWidth, model.top / (float) canvasHeight,
                     model.right / (float) canvasWidth, model.bottom / (float) canvasHeight);
             // Keep the opaque window steady as the silhouette changes between frames.
             // Expand only when a pose exceeds the space already reserved.
-            if (!cropArea.contains(modelArea)) {
-                RectF visible = new RectF(modelArea);
+            if (!cropArea.contains(visible)) {
                 visible.inset(-.045f, -.045f);
                 visible.union(.15f, .06f, .85f, .94f);
                 visible.intersect(0, 0, 1, 1);
@@ -275,51 +211,40 @@ public final class PetService extends Service {
             }
         }
         shape.addControls(touchRegion, canvasWidth, canvasHeight);
-        touchRegionDirty = true;
-        if (fixedWindow) container.invalidate();
-        else updateWindowFrame();
+        updateWindowFrame();
+        pushTouchRegion();
     }
 
     private void updateWindowFrame() {
         if (cropArea.isEmpty()) crop.set(0, 0, 1, 1);
         else crop.set(Math.round(cropArea.left * canvasWidth), Math.round(cropArea.top * canvasHeight),
                 Math.round(cropArea.right * canvasWidth), Math.round(cropArea.bottom * canvasHeight));
-        // Clip the window ourselves so WindowManager never shifts negative coordinates inward.
+        // Keep the clipped window on the physical display when the model extends past an edge.
         if (!crop.intersect(-canvasX, -canvasY, displayWidth - canvasX, displayHeight - canvasY)) {
             int x = Math.max(0, Math.min(displayWidth - 1, canvasX)) - canvasX;
             int y = Math.max(0, Math.min(displayHeight - 1, canvasY)) - canvasY;
             crop.set(x, y, x + 1, y + 1);
         }
-        layoutWindow(canvasX + crop.left, canvasY + crop.top, crop.width(), crop.height());
-        // A translation or scale change also needs a draw when the window bounds match.
-        container.invalidate();
-    }
-
-    private void layoutWindow(int x, int y, int width, int height) {
-        if (frame.x != x || frame.y != y || frame.width != width || frame.height != height) {
+        player.view().setTranslationX(-crop.left);
+        player.view().setTranslationY(-crop.top);
+        int x = canvasX + crop.left, y = canvasY + crop.top;
+        if (frame.x != x || frame.y != y || frame.width != crop.width() || frame.height != crop.height()) {
             frame.x = x;
             frame.y = y;
-            frame.width = width;
-            frame.height = height;
+            frame.width = crop.width();
+            frame.height = crop.height();
             window.updateViewLayout(container, frame);
         }
     }
 
     private void pushTouchRegion() {
-        if (!fixedWindow) return;
+        if (Build.VERSION.SDK_INT < 33 || ((DragFrame) container).pinching) return;
         AttachedSurfaceControl surface = container.getRootSurfaceControl();
         if (surface != null) {
-            Region local;
-            if (((DragFrame) container).capturingModel) {
-                // Keep both fingers in the same gesture when the second lands beside the model.
-                local = new Region(0, 0, displayWidth, displayHeight);
-            } else {
-                local = new Region(touchRegion);
-                local.translate(canvasX, canvasY);
-                local.op(0, 0, displayWidth, displayHeight, Region.Op.INTERSECT);
-            }
+            Region local = new Region(touchRegion);
+            local.op(crop, Region.Op.INTERSECT);
+            local.translate(-crop.left, -crop.top);
             surface.setTouchableRegion(local);
-            touchRegionDirty = false;
         }
     }
 
@@ -341,7 +266,6 @@ public final class PetService extends Service {
         boolean show = wantedVisible && !settingsOpen;
         if (visible == show) return;
         visible = show;
-        if (!show) ((DragFrame) container).cancelGesture();
         container.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
         updateWindowCrop();
         player.status();
@@ -356,12 +280,14 @@ public final class PetService extends Service {
         width = limitWidth(width);
         int height = heightForWidth(width);
         PointF grip = player.touchShape().grip();
-        int anchorX = Math.round(width * (modelArea.isEmpty() ? .5f : modelArea.centerX()));
+        int anchorX = Math.round(width * (grip == null ? .5f : grip.x));
         int anchorY = Math.round(height * (grip == null ? .54f : grip.y));
-        int marginX = Math.min(dp(4), displayWidth / 2);
+        boolean landscape = displayWidth > displayHeight;
+        int left = landscape ? 0 : screen.left;
+        int right = landscape ? displayWidth : screen.right;
+        int marginX = Math.min(dp(24), (right - left) / 2);
         int marginY = Math.min(dp(24), screen.height() / 2);
-        // Horizontal hiding uses the physical edges, symmetric even with an inset on one side.
-        x = Math.max(marginX - anchorX, Math.min(displayWidth - marginX - anchorX, x));
+        x = Math.max(left + marginX - anchorX, Math.min(right - marginX - anchorX, x));
         y = Math.max(screen.top + marginY - anchorY, Math.min(screen.bottom - marginY - anchorY, y));
         boolean resized = canvasWidth != width || canvasHeight != height;
         if (!resized && canvasX == x && canvasY == y) return;
@@ -370,46 +296,64 @@ public final class PetService extends Service {
         canvasWidth = width;
         canvasHeight = height;
         if (container != null) {
-            boolean moving = ((DragFrame) container).isMoving();
-            if (fixedWindow) positionViewport();
-            else {
-                if (resized && !moving) syncViewport();
-                if (moving) updateWindowFrame();
+            if (resized) {
+                android.view.ViewGroup.LayoutParams size = player.view().getLayoutParams();
+                size.width = width;
+                size.height = height;
+                player.view().setLayoutParams(size);
             }
-            if (!moving) updateWindowCrop();
+            if (((DragFrame) container).pinching) updateWindowFrame();
+            else updateWindowCrop();
         }
     }
 
-    private void positionViewport() {
-        View view = player.view();
-        if (view.getWidth() == 0 || view.getHeight() == 0) return;
-        view.setTranslationX(fixedWindow ? canvasX : -crop.left);
-        view.setTranslationY(fixedWindow ? canvasY : -crop.top);
-        view.setScaleX(canvasWidth / (float) view.getWidth());
-        view.setScaleY(canvasHeight / (float) view.getHeight());
-        if (touchRegionDirty && !((DragFrame) container).isMoving()) pushTouchRegion();
+    private void scheduleDisplayRefresh() {
+        if (container == null) return;
+        main.removeCallbacks(refreshDisplay);
+        main.post(refreshDisplay);
+        // Some devices publish the new metrics after the configuration callback.
+        main.postDelayed(refreshDisplay, 120);
     }
 
-    private void syncViewport() {
-        View view = player.view();
-        android.view.ViewGroup.LayoutParams size = view.getLayoutParams();
-        if (size.width != canvasWidth || size.height != canvasHeight) {
-            size.width = canvasWidth;
-            size.height = canvasHeight;
-            view.setLayoutParams(size);
+    private void refreshDisplayBounds() {
+        if (container == null || !container.isAttachedToWindow()) return;
+        Rect previous = screen;
+        int previousWidth = displayWidth, previousHeight = displayHeight;
+        readScreenBounds();
+        if (previousWidth == displayWidth && previousHeight == displayHeight) {
+            if (!screen.equals(previous)) {
+                place(canvasX, canvasY, canvasWidth);
+                updateWindowCrop();
+            }
+            return;
         }
+        ((DragFrame) container).cancelForRotation();
+        PointF grip = player.touchShape().grip();
+        float gx = grip == null ? .5f : grip.x, gy = grip == null ? .54f : grip.y;
+        float relativeX = (canvasX + gx * canvasWidth - previous.left) / Math.max(1, previous.width());
+        float relativeY = (canvasY + gy * canvasHeight - previous.top) / Math.max(1, previous.height());
+        int width = limitWidth(canvasWidth);
+        int x = Math.round(screen.left + relativeX * screen.width() - gx * width);
+        int y = Math.round(screen.top + relativeY * screen.height() - gy * heightForWidth(width));
+        place(x, y, width);
+        updateWindowCrop();
+        savePlacement();
     }
 
-    @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
+    private void savePlacement() {
+        saved.edit().putInt("x", canvasX).putInt("y", canvasY).putInt("width", canvasWidth)
+                .putBoolean("fixedAspect", true).apply();
+    }
+
+    @Override public void onConfigurationChanged(Configuration configuration) {
         super.onConfigurationChanged(configuration);
         scheduleDisplayRefresh();
     }
 
     @Override public void onDestroy() {
         if (active == this) active = null;
-        main.removeCallbacksAndMessages(null);
+        main.removeCallbacks(refreshDisplay);
         if (displays != null) displays.unregisterDisplayListener(displayListener);
-        if (overlayContext != null) overlayContext.unregisterComponentCallbacks(overlayConfiguration);
         if (homeVisibility != null) homeVisibility.close();
         if (container != null && container.isAttachedToWindow()) window.removeViewImmediate(container);
         if (player != null) {
@@ -457,10 +401,8 @@ public final class PetService extends Service {
         private int windowY;
         private boolean dragging;
         private boolean pinching;
-        private boolean dragFromPinch;
         private boolean controlsGesture;
-        private boolean capturingModel;
-        private boolean ignoreGesture;
+        private boolean rotatingGesture;
         private int firstFinger;
         private int secondFinger;
         private float initialSpan;
@@ -472,17 +414,10 @@ public final class PetService extends Service {
 
         DragFrame(Context context) {
             super(context);
-            slop = Math.max(1, ViewConfiguration.get(context).getScaledTouchSlop() / 2);
+            slop = ViewConfiguration.get(context).getScaledTouchSlop();
         }
 
-        private boolean isMoving() { return dragging || pinching; }
-
         private void queueFrame(int x, int y, int width) {
-            if (fixedWindow) {
-                // MotionEvent already contains the latest batched input for this frame.
-                place(x, y, width);
-                return;
-            }
             nextX = x;
             nextY = y;
             nextWidth = width;
@@ -498,13 +433,13 @@ public final class PetService extends Service {
             place(nextX, nextY, nextWidth);
         }
 
-        private void beginPinch(MotionEvent event, int first, int second) {
+        private void beginPinch(MotionEvent event) {
             removeCallbacks(drawFrame);
             applyFrame();
-            firstFinger = event.getPointerId(first);
-            secondFinger = event.getPointerId(second);
-            float x = event.getRawX(first), y = event.getRawY(first);
-            float otherX = event.getRawX(second), otherY = event.getRawY(second);
+            firstFinger = event.getPointerId(0);
+            secondFinger = event.getPointerId(event.getActionIndex());
+            float x = event.getRawX(0), y = event.getRawY(0);
+            float otherX = event.getRawX(event.getActionIndex()), otherY = event.getRawY(event.getActionIndex());
             initialSpan = Math.max(1, (float) Math.hypot(x - otherX, y - otherY));
             initialWidth = canvasWidth;
             anchorX = ((x + otherX) / 2 - canvasX) / canvasWidth;
@@ -520,113 +455,67 @@ public final class PetService extends Service {
             float span = (float) Math.hypot(x - otherX, y - otherY);
             int width = limitWidth(Math.round(initialWidth * span / initialSpan));
             int height = heightForWidth(width);
-            queueFrame(Math.round((x + otherX) / 2 - anchorX * width),
+            // Android already batches MOVE events to the display frame.
+            place(Math.round((x + otherX) / 2 - anchorX * width),
                     Math.round((y + otherY) / 2 - anchorY * height), width);
         }
 
-        private void resetGesture() {
-            removeCallbacks(drawFrame);
-            applyFrame();
-            if (isMoving()) {
-                if (!fixedWindow) syncViewport();
-                player.manipulating(false, fixedWindow ? canvasWidth / (float) player.view().getWidth() : 1);
-            }
-            dragging = pinching = dragFromPinch = controlsGesture = false;
-        }
-
-        private void reanchorDrag(MotionEvent event, int pointer) {
-            startX = event.getRawX(pointer);
-            startY = event.getRawY(pointer);
-            windowX = canvasX;
-            windowY = canvasY;
-        }
-
-        private void liftPinchFinger(MotionEvent event) {
-            int lifted = event.getActionIndex();
-            int id = event.getPointerId(lifted);
-            if (id != firstFinger && id != secondFinger) return;
-            int remaining = event.findPointerIndex(id == firstFinger ? secondFinger : firstFinger);
-            for (int i = 0; i < event.getPointerCount(); i++) {
-                if (i == remaining || i == lifted) continue;
-                beginPinch(event, remaining, i);
-                return;
-            }
-            removeCallbacks(drawFrame);
-            applyFrame();
-            pinching = false;
-            dragging = dragFromPinch = true;
-            reanchorDrag(event, remaining);
-        }
-
-        private void cancelGesture() {
+        private void cancelForRotation() {
             removeCallbacks(drawFrame);
             framePending = false;
-            resetGesture();
-            capturingModel = false;
-            ignoreGesture = true;
+            if (pinching) player.pinching(false);
+            dragging = pinching = controlsGesture = false;
+            rotatingGesture = true;
         }
 
         @Override public boolean dispatchTouchEvent(MotionEvent event) {
             int action = event.getActionMasked();
-            if (action == MotionEvent.ACTION_DOWN) ignoreGesture = false;
-            else if (ignoreGesture) {
-                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) ignoreGesture = false;
-                return true;
-            }
+            if (action == MotionEvent.ACTION_DOWN) rotatingGesture = false;
+            else if (rotatingGesture && action != MotionEvent.ACTION_CANCEL) return true;
             if (action == MotionEvent.ACTION_DOWN) {
-                float localX = event.getX() + (fixedWindow ? -canvasX : crop.left);
-                float localY = event.getY() + (fixedWindow ? -canvasY : crop.top);
-                controlsGesture = player.touchShape().hitsControls(localX / canvasWidth, localY / canvasHeight);
-                dragging = pinching = dragFromPinch = false;
-                reanchorDrag(event, 0);
-                if (!controlsGesture && fixedWindow) {
-                    capturingModel = true;
-                    pushTouchRegion();
-                }
+                if (Build.VERSION.SDK_INT >= 34) frame.setCanPlayMoveAnimation(true);
+                controlsGesture = player.hitsControls(event.getX() + crop.left, event.getY() + crop.top);
+                dragging = pinching = false;
+                startX = event.getRawX();
+                startY = event.getRawY();
+                windowX = canvasX;
+                windowY = canvasY;
             }
             if (controlsGesture) {
                 if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) controlsGesture = false;
                 return super.dispatchTouchEvent(event);
             }
             if (action == MotionEvent.ACTION_POINTER_DOWN && !pinching) {
-                if (!dragging) {
-                    cancelChild(event);
-                    player.manipulating(true, 1);
-                }
+                if (!dragging) cancelChild(event);
                 pinching = true;
-                beginPinch(event, 0, event.getActionIndex());
+                beginPinch(event);
+                if (Build.VERSION.SDK_INT >= 34) frame.setCanPlayMoveAnimation(false);
+                player.pinching(true);
             }
-            if (pinching && action == MotionEvent.ACTION_POINTER_UP) {
-                liftPinchFinger(event);
-            } else if (pinching && action == MotionEvent.ACTION_MOVE) {
+            if (pinching && action == MotionEvent.ACTION_MOVE) {
                 movePinch(event);
             } else if (!pinching && action == MotionEvent.ACTION_MOVE) {
                 float dx = event.getRawX() - startX;
                 float dy = event.getRawY() - startY;
-                float distance = (float) Math.hypot(dx, dy);
-                if (!dragging && distance > slop) {
+                if (!dragging && Math.hypot(dx, dy) > slop) {
                     cancelChild(event);
                     dragging = true;
-                    player.manipulating(true, 1);
                 }
-                if (dragging) {
-                    // Taper the dead zone away, so the grabbed point catches up to the finger.
-                    float follow = dragFromPinch || distance >= 2 * slop ? 1
-                            : Math.max(0, 2 * (distance - slop)) / Math.max(1, distance);
-                    queueFrame(windowX + Math.round(dx * follow), windowY + Math.round(dy * follow), canvasWidth);
-                }
+                if (dragging) queueFrame(windowX + Math.round(dx), windowY + Math.round(dy), canvasWidth);
             }
+            if (!dragging && !pinching) return super.dispatchTouchEvent(event);
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                capturingModel = false;
-                if (isMoving()) {
-                    resetGesture();
+                removeCallbacks(drawFrame);
+                applyFrame();
+                boolean finishedPinch = pinching;
+                dragging = pinching = false;
+                if (finishedPinch) {
+                    player.pinching(false);
                     updateWindowCrop();
-                    savePlacement();
-                    return true;
                 }
-                pushTouchRegion();
+                savePlacement();
             }
-            return isMoving() || super.dispatchTouchEvent(event) || capturingModel;
+            return true;
         }
 
         private void cancelChild(MotionEvent event) {

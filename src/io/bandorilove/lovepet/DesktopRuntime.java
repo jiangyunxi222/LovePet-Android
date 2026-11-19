@@ -62,6 +62,9 @@ final class DesktopRuntime {
             case "scene":
                 if (DESKTOP) PetWallpaperService.refreshScene();
                 break;
+            case "wallpaper-preview-visible":
+                if (!DESKTOP) MainActivity.wallpaperPreviewVisible();
+                break;
             case WallpaperTilt.SETTING:
                 if (DESKTOP) PetWallpaperService.refreshTilt();
                 break;
