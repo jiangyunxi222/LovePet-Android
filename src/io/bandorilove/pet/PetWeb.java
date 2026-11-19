@@ -13,6 +13,7 @@ import org.json.JSONObject;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -25,12 +26,14 @@ final class PetWeb {
     private final ModelStore store;
     private final WebView view;
     private final boolean desktop;
-    private boolean wallpaperMode;
+    private final WallpaperMedia.Writer mediaWriter;
+    private volatile boolean wallpaperMode;
     private boolean wallpaperShown;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final PetTouchShape touchShape = new PetTouchShape();
     private Runnable onTouchShapeChanged = () -> {};
     private Runnable applyWallpaper = () -> {};
+    private Runnable wallpaperFrameReady = () -> {};
     private Runnable promptAction;
     private int promptId;
 
@@ -39,6 +42,7 @@ final class PetWeb {
             Runnable rendererGone) {
         this.context = context;
         this.desktop = desktop;
+        mediaWriter = new WallpaperMedia.Writer(context);
         store = new ModelStore(context);
         view = new WebView(context);
         view.setBackgroundColor(desktop ? Color.TRANSPARENT : Color.rgb(250, 246, 249));
@@ -69,7 +73,8 @@ final class PetWeb {
         view.setWebChromeClient(new WebChromeClient() {
             @Override public boolean onShowFileChooser(WebView web, ValueCallback<Uri[]> callback,
                     FileChooserParams params) {
-                return context instanceof MainActivity && ((MainActivity) context).chooseSceneFile(callback);
+                return context instanceof MainActivity && ((MainActivity) context).chooseSceneFile(callback,
+                        Arrays.stream(params.getAcceptTypes()).anyMatch(type -> type.startsWith("video/")));
             }
             @Override public boolean onConsoleMessage(ConsoleMessage message) {
                 if (message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
@@ -83,6 +88,39 @@ final class PetWeb {
             @JavascriptInterface public void togglePet() { main.post(toggle); }
             @JavascriptInterface public void openPanel() { if (desktop) main.post(openPanel); }
             @JavascriptInterface public void applyWallpaper() { if (!desktop && !wallpaperMode) main.post(applyWallpaper); }
+            @JavascriptInterface public void wallpaperFrameReady() {
+                main.post(() -> {
+                    if (!wallpaperMode) return;
+                    view.postVisualStateCallback(0, new WebView.VisualStateCallback() {
+                        @Override public void onComplete(long requestId) { wallpaperFrameReady.run(); }
+                    });
+                });
+            }
+            @JavascriptInterface public String desktopSetting(String key) {
+                return sharedKey(key) ? DesktopRuntime.read(context, key) : null;
+            }
+            @JavascriptInterface public boolean setDesktopSetting(String key, String value) {
+                if (!(context instanceof MainActivity) || !sharedKey(key) || !DesktopRuntime.write(context, key, value)) return false;
+                if (key.equals("wallpaper-scene-v1")) DesktopRuntime.signal("scene");
+                return true;
+            }
+            @JavascriptInterface public boolean hasWallpaperMedia(String id) {
+                return context instanceof MainActivity && WallpaperMedia.find(context, id) != null;
+            }
+            @JavascriptInterface public boolean beginWallpaperMedia(String id, String type, int length) {
+                return context instanceof MainActivity && mediaWriter.begin(id, type, length);
+            }
+            @JavascriptInterface public boolean appendWallpaperMedia(String chunk) {
+                return context instanceof MainActivity && mediaWriter.append(chunk);
+            }
+            @JavascriptInterface public boolean finishWallpaperMedia() {
+                return context instanceof MainActivity && mediaWriter.finish();
+            }
+            @JavascriptInterface public void removeWallpaperMedia(String id) {
+                if (!(context instanceof MainActivity)) return;
+                File file = WallpaperMedia.find(context, id);
+                if (file != null) file.delete();
+            }
             @JavascriptInterface public void refreshPermissions() {
                 if (context instanceof MainActivity) main.post(() -> ((MainActivity) context).updatePermissionStatus());
             }
@@ -109,27 +147,40 @@ final class PetWeb {
             @JavascriptInterface public void settingsVisible(boolean visible) { if (!desktop) main.post(() -> settingsVisible.accept(visible)); }
             @JavascriptInterface public boolean canUseHomeMode() { return HomeVisibility.hasUsageAccess(context); }
             @JavascriptInterface public boolean interactionFavoritesOnly() {
-                return context.getSharedPreferences("player", Context.MODE_PRIVATE).getBoolean("interactionFavoritesOnly", false);
+                return preference("interactionFavoritesOnly", false);
             }
             @JavascriptInterface public void setInteractionFavoritesOnly(boolean enabled) {
-                if (!desktop) context.getSharedPreferences("player", Context.MODE_PRIVATE).edit()
-                        .putBoolean("interactionFavoritesOnly", enabled).apply();
+                if (context instanceof MainActivity) writePreference("interactionFavoritesOnly", enabled);
             }
             @JavascriptInterface public boolean captionCardsEnabled() {
-                return context.getSharedPreferences("player", Context.MODE_PRIVATE).getBoolean("captionCardsEnabled", true);
+                return preference("captionCardsEnabled", true);
+            }
+            @JavascriptInterface public String theme() { return DesktopRuntime.read(context, "theme"); }
+            @JavascriptInterface public void setTheme(String theme) {
+                if (!(context instanceof MainActivity) || theme == null || !theme.matches("[a-z]{3,12}")) return;
+                if (DesktopRuntime.write(context, "theme", theme)) DesktopRuntime.signal("theme");
+            }
+            @JavascriptInterface public boolean touchMenuEnabled() { return preference("touchMenuEnabled", true); }
+            @JavascriptInterface public boolean thirdPartyMenuEnabled() { return preference("thirdPartyMenuEnabled", false); }
+            @JavascriptInterface public void setTouchMenuEnabled(boolean enabled, boolean thirdParty) {
+                if (!(context instanceof MainActivity)) return;
+                writePreference(thirdParty ? "thirdPartyMenuEnabled" : "touchMenuEnabled", enabled);
+                main.post(() -> {
+                    updateTouchMenu(enabled, thirdParty);
+                    DesktopRuntime.flag(thirdParty ? "third-party-menu" : "touch-menu", enabled);
+                });
             }
             @JavascriptInterface public void setCaptionCardsEnabled(boolean enabled) {
                 if (!(context instanceof MainActivity)) return;
-                context.getSharedPreferences("player", Context.MODE_PRIVATE).edit().putBoolean("captionCardsEnabled", enabled).apply();
+                writePreference("captionCardsEnabled", enabled);
                 main.post(() -> {
                     updateCaptionCards(enabled);
-                    PetService.updateCaptions(enabled);
-                    PetWallpaperService.updateCaptions(enabled);
+                    DesktopRuntime.flag("captions", enabled);
                 });
             }
             @JavascriptInterface public void command(String text) { main.post(() -> send(text)); }
-            @JavascriptInterface public boolean petShowing() { return PetService.showing(); }
-            @JavascriptInterface public boolean petVisible() { return PetService.visible(); }
+            @JavascriptInterface public boolean petShowing() { return DesktopRuntime.petShowing(); }
+            @JavascriptInterface public boolean petVisible() { return DesktopRuntime.petVisible(); }
             @JavascriptInterface public boolean homeOnly() { return PetService.homeOnly(context); }
             @JavascriptInterface public void immersivePreview(boolean on) {
                 if (!desktop) main.post(() -> immersive.accept(on));
@@ -149,9 +200,29 @@ final class PetWeb {
                 });
             }
             @JavascriptInterface public int costume(String identity) {
-                return context.getSharedPreferences("player", Context.MODE_PRIVATE).getInt("costume:" + identity, -1);
+                String key = "costume:" + identity;
+                if (identity.matches("[A-Za-z0-9_-]{1,80}")) {
+                    String shared = DesktopRuntime.read(context, key);
+                    if (shared != null) return Integer.parseInt(shared);
+                }
+                return context.getSharedPreferences("player", Context.MODE_PRIVATE).getInt(key, -1);
             }
         }, "AndroidPet");
+    }
+
+    private static boolean sharedKey(String key) {
+        return key != null && (key.equals("wallpaper-scene-v1") || key.matches("(?:favorites|performances):[A-Za-z0-9_-]{1,80}"));
+    }
+
+    private boolean preference(String key, boolean fallback) {
+        String shared = DesktopRuntime.read(context, key);
+        return shared == null ? context.getSharedPreferences("player", Context.MODE_PRIVATE).getBoolean(key, fallback)
+                : Boolean.parseBoolean(shared);
+    }
+
+    private void writePreference(String key, boolean value) {
+        DesktopRuntime.write(context, key, Boolean.toString(value));
+        context.getSharedPreferences("player", Context.MODE_PRIVATE).edit().putBoolean(key, value).apply();
     }
 
     WebView view() { return view; }
@@ -167,6 +238,14 @@ final class PetWeb {
         view.loadUrl(HOME + "?wallpaper=1");
     }
     void onApplyWallpaper(Runnable action) { applyWallpaper = action; }
+    void onWallpaperFrameReady(Runnable action) { wallpaperFrameReady = action; }
+    void canCacheWallpaperFrame(Consumer<Boolean> callback) {
+        view.evaluateJavascript("window.canCacheWallpaperFrame?.() === true", result -> callback.accept("true".equals(result)));
+    }
+    void setPaused(boolean paused) {
+        if (paused) view.onPause();
+        else view.onResume();
+    }
     void wallpaperVisible(boolean visible) {
         wallpaperShown = visible;
         if (visible) view.onResume();
@@ -177,10 +256,21 @@ final class PetWeb {
         if (view.getWidth() <= 0 || view.getHeight() <= 0) return;
         evaluate("window.wallpaperTap?.(" + ((float) x / view.getWidth()) + "," + ((float) y / view.getHeight()) + ")");
     }
+    void wallpaperGaze(float x, float y) {
+        if (view.getWidth() <= 0 || view.getHeight() <= 0) return;
+        evaluate("window.wallpaperGaze?.(" + (x / view.getWidth()) + "," + (y / view.getHeight()) + ")");
+    }
+    void resetWallpaperGaze() { evaluate("window.wallpaperGaze?.()"); }
     void refresh() { evaluate("window.refreshModel?.()"); }
+    void refreshWallpaperScene() { evaluate("window.sceneLayers?.reloadDesktopScene()"); }
     void updateCaptionCards(boolean enabled) { evaluate("window.setCaptionCardsEnabled?.(" + enabled + ")"); }
+    void updateTheme() { evaluate("window.refreshAppTheme?.()"); }
+    void updateTouchMenu(boolean enabled, boolean thirdParty) {
+        evaluate("window.setTouchMenuEnabled?.(" + enabled + "," + thirdParty + ")");
+    }
     void closeSettings() {
-        evaluate("(document.querySelector('#app-prompt[open]') || document.querySelector('#permission-config[open], #app-library[open]')"
+        evaluate("(document.querySelector('#app-prompt[open]') || document.querySelector('#performance-options[open]')"
+                + " || document.querySelector('#permission-config[open], #app-library[open], #performance-settings[open]')"
                 + " || document.querySelector('#settings')).close()");
     }
     void modelLibraryResult(int request, String error) {
@@ -206,7 +296,7 @@ final class PetWeb {
         evaluate("window.setDesktopCrop?.(" + bounds.left + "," + bounds.top + "," + bounds.right + "," + bounds.bottom + ")");
     }
     void status() {
-        evaluate("window.petStatus?.(" + PetService.showing() + "," + PetService.visible() + ","
+        evaluate("window.petStatus?.(" + DesktopRuntime.petShowing() + "," + DesktopRuntime.petVisible() + ","
                 + PetService.homeOnly(context) + ")");
     }
     void progress(boolean busy) { evaluate("window.importProgress?.(" + busy + ")"); }
@@ -218,6 +308,9 @@ final class PetWeb {
     private void evaluate(String script) { view.evaluateJavascript(script, null); }
     void destroy() {
         main.removeCallbacksAndMessages(null);
+        wallpaperMode = false;
+        wallpaperFrameReady = () -> {};
+        mediaWriter.abort();
         view.removeJavascriptInterface("AndroidPet");
         view.destroy();
     }
@@ -226,16 +319,21 @@ final class PetWeb {
         if (text.length() > 4096) return;
         try {
             JSONObject command = new JSONObject(text);
-            if (!java.util.Set.of("costume", "action", "expression", "voice", "reset", "loop").contains(command.optString("type"))) return;
+            if (!java.util.Set.of("costume", "action", "expression", "voice", "reset", "loop", "performance").contains(command.optString("type"))) return;
             if (command.optString("type").equals("costume")) {
                 String identity = command.getString("role");
                 if (!identity.matches("[A-Za-z0-9_-]{1,80}")) return;
-                context.getSharedPreferences("player", Context.MODE_PRIVATE).edit()
-                        .putInt("costume:" + identity, command.getInt("id")).apply();
+                DesktopRuntime.write(context, "costume:" + identity, Integer.toString(command.getInt("id")));
             }
-            MainActivity.receive(command);
-            PetService.receive(command);
-            PetWallpaperService.receive(command);
+            boolean petSound = DesktopRuntime.petVisible();
+            if (DesktopRuntime.isDesktop()) {
+                PetService.receive(command, petSound);
+                PetWallpaperService.receive(command, !petSound);
+                DesktopRuntime.command(command, false);
+            } else {
+                MainActivity.receive(command, !petSound);
+                DesktopRuntime.command(command, petSound);
+            }
         } catch (org.json.JSONException error) {
             Log.w("BandoriLove", "Invalid player command", error);
         }
@@ -253,6 +351,10 @@ final class PetWeb {
                         ? new ByteArrayInputStream("null".getBytes(StandardCharsets.UTF_8))
                         : new FileInputStream(new File(active, "session.json")));
             }
+            if (wallpaperMode && name.startsWith("wallpaper-media/")) {
+                File media = WallpaperMedia.find(context, name.substring("wallpaper-media/".length()));
+                return media == null ? missing() : response(WallpaperMedia.mime(media), new FileInputStream(media));
+            }
             if (name.equals("saved-models") && context instanceof MainActivity) {
                 byte[] items = store.history().toString().getBytes(StandardCharsets.UTF_8);
                 return response("application/json", new ByteArrayInputStream(items));
@@ -269,7 +371,9 @@ final class PetWeb {
                 File file = new File(active, asset);
                 return file.isFile() ? response(mime(asset), new FileInputStream(file)) : missing();
             }
-            if (name.equals("index.html") || name.equals("app.js") || name.equals("scene.js") || name.equals("library.js") || name.equals("style.css")
+            if (name.equals("index.html") || name.equals("app.js") || name.equals("scene.js") || name.equals("library.js")
+                    || name.equals("performance.js") || name.equals("style.css")
+                    || name.equals("theme.js") || name.equals("viewer-interaction.js")
                     || name.equals("tsparticles.engine.min.js") || name.equals("tsparticles.slim.bundle.min.js") || name.equals("petal.svg")
                     || name.equals("butterfly.svg") || name.equals("note.svg") || name.equals("bokeh.svg")
                     || name.equals("favicon.svg") || name.equals("pixi.min.js") || name.equals("index.min.js")

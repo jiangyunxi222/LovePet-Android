@@ -53,13 +53,18 @@ public final class PetService extends Service {
         return current != null && current.visible;
     }
     static boolean homeOnly(Context context) {
+        String shared = DesktopRuntime.read(context, HOME_ONLY);
+        if (shared != null) return Boolean.parseBoolean(shared);
         return context.getSharedPreferences("overlay", MODE_PRIVATE).getBoolean(HOME_ONLY, false);
     }
     static void setHomeOnly(Context context, boolean homeOnly) {
-        context.getSharedPreferences("overlay", MODE_PRIVATE).edit().putBoolean(HOME_ONLY, homeOnly).apply();
+        DesktopRuntime.write(context, HOME_ONLY, Boolean.toString(homeOnly));
+        DesktopRuntime.flag("placement", homeOnly);
+        MainActivity.petChanged();
+    }
+    static void applyHomeOnly(boolean homeOnly) {
         PetService current = active;
         if (current != null) current.configureVisibility(homeOnly);
-        MainActivity.petChanged();
     }
     static void suspendForSettings(boolean open) {
         PetService current = active;
@@ -68,17 +73,18 @@ public final class PetService extends Service {
             current.updateVisibility();
         }
     }
-    static void updatePreviewVisibility() {
-        PetService current = active;
-        if (current != null) current.updateVisibility();
+    @Override public void onCreate() {
+        super.onCreate();
+        DesktopRuntime.initialize(this);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int id) {
-        if (intent == null || STOP.equals(intent.getAction()) || !Settings.canDrawOverlays(this)) {
+        if ((intent != null && STOP.equals(intent.getAction())) || !Settings.canDrawOverlays(this)
+                || new ModelStore(this).active() == null) {
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (container != null) return START_NOT_STICKY;
+        if (container != null) return START_STICKY;
         startForeground(42, notification());
         try {
             showOverlay();
@@ -86,7 +92,7 @@ public final class PetService extends Service {
             android.util.Log.e("BandoriLove", "Could not show Android pet", error);
             stopSelf();
         }
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
 
     private Notification notification() {
@@ -127,7 +133,7 @@ public final class PetService extends Service {
         active = this;
         configureVisibility(homeOnly(this));
         player.load();
-        MainActivity.petChanged();
+        DesktopRuntime.reportPet();
     }
 
     private WindowManager.LayoutParams overlayFrame() {
@@ -218,13 +224,13 @@ public final class PetService extends Service {
     }
 
     private void updateVisibility() {
-        boolean show = wantedVisible && !settingsOpen && !MainActivity.showingImmersivePreview();
+        boolean show = wantedVisible && !settingsOpen;
         if (visible == show) return;
         visible = show;
         container.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
         updateWindowCrop();
         player.status();
-        MainActivity.petChanged();
+        DesktopRuntime.reportPet();
     }
 
     private int dp(int value) {
@@ -275,15 +281,15 @@ public final class PetService extends Service {
             player.destroy();
         }
         stopForeground(STOP_FOREGROUND_REMOVE);
-        MainActivity.petChanged();
+        DesktopRuntime.reportPet();
         super.onDestroy();
     }
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
-    static void receive(JSONObject command) {
+    static void receive(JSONObject command, boolean sound) {
         PetService current = active;
-        if (current != null) current.player.receive(command, current.visible);
+        if (current != null) current.player.receive(command, sound && current.visible);
     }
 
     static void refresh() {
@@ -294,6 +300,16 @@ public final class PetService extends Service {
     static void updateCaptions(boolean enabled) {
         PetService current = active;
         if (current != null && current.player != null) current.player.updateCaptionCards(enabled);
+    }
+
+    static void updateTheme() {
+        PetService current = active;
+        if (current != null && current.player != null) current.player.updateTheme();
+    }
+
+    static void updateTouchMenu(boolean enabled, boolean thirdParty) {
+        PetService current = active;
+        if (current != null && current.player != null) current.player.updateTouchMenu(enabled, thirdParty);
     }
 
     private final class DragFrame extends FrameLayout {

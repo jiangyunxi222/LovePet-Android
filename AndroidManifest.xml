@@ -21,6 +21,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <permission android:name="io.bandorilove.pet.permission.DESKTOP_EVENT" android:protectionLevel="signature" />
+    <uses-permission android:name="io.bandorilove.pet.permission.DESKTOP_EVENT" />
     <application android:label="BandoriLovePet" android:icon="@drawable/pet_icon"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false" android:hardwareAccelerated="true">
@@ -31,11 +33,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <service android:name=".PetService" android:exported="false" android:foregroundServiceType="specialUse">
+        <service android:name=".PetService" android:exported="false" android:process=":desktop" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-enabled interactive Live2D pet overlay with a persistent stop control" />
         </service>
-        <service android:name=".PetWallpaperService" android:label="BandoriLovePet"
+        <service android:name=".PetWallpaperService" android:label="BandoriLovePet" android:process=":desktop"
             android:permission="android.permission.BIND_WALLPAPER" android:exported="true">
             <intent-filter>
                 <action android:name="android.service.wallpaper.WallpaperService" />

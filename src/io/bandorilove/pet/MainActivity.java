@@ -80,6 +80,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        DesktopRuntime.initialize(this);
         if (saved != null) {
             pendingDocument = saved.getParcelable("pendingDocument");
             wallpaperPicker = saved.getInt("wallpaperPicker");
@@ -155,7 +156,7 @@ public final class MainActivity extends Activity {
 
     private void setImmersivePreview(boolean immersive) {
         immersivePreview = immersive;
-        PetService.updatePreviewVisibility();
+        updateDesktopVisibility();
         if (frame != null) frame.requestApplyInsets();
         android.view.WindowInsetsController controller = getWindow().getInsetsController();
         if (controller == null) return;
@@ -182,8 +183,11 @@ public final class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         setImmersivePreview(immersivePreview);
-        PetService.updatePreviewVisibility();
-        if (player != null) player.status();
+        DesktopRuntime.queryPet();
+        if (player != null) {
+            player.setPaused(false);
+            player.status();
+        }
         updateWallpaperStatus();
         updatePermissionStatus();
         if (wallpaperPicker != 0 && wallpaperPickerPaused) {
@@ -196,18 +200,14 @@ public final class MainActivity extends Activity {
     @Override protected void onPause() {
         if (wallpaperPicker != 0) wallpaperPickerPaused = true;
         resumed = false;
-        PetService.updatePreviewVisibility();
+        if (player != null) player.setPaused(true);
+        updateDesktopVisibility();
         super.onPause();
-    }
-
-    static boolean showingImmersivePreview() {
-        MainActivity activity = active.get();
-        return activity != null && activity.resumed && activity.immersivePreview;
     }
 
     @Override protected void onDestroy() {
         if (active.get() == this) active.clear();
-        if (settingsVisible || awaitingUsageAccess || externalPicker) PetService.suspendForSettings(false);
+        updateDesktopVisibility();
         imports.shutdown();
         releasePlayer();
         super.onDestroy();
@@ -345,8 +345,7 @@ public final class MainActivity extends Activity {
         if (player == null) return;
         if (error == null) {
             player.refresh();
-            PetService.refresh();
-            PetWallpaperService.refresh();
+            DesktopRuntime.signal("model");
         } else {
             player.progress(false);
             player.prompt("导入模型", error instanceof java.io.IOException ? error.getMessage() : "模型配置无效，无法导入。", null, null);
@@ -378,8 +377,7 @@ public final class MainActivity extends Activity {
                 requester.modelLibraryResult(request, result);
                 if (!result.isEmpty()) return;
                 if (store.active() == null) stopService(new Intent(this, PetService.class));
-                PetService.refresh();
-                PetWallpaperService.refresh();
+                DesktopRuntime.signal("model");
             });
         });
     }
@@ -417,7 +415,8 @@ public final class MainActivity extends Activity {
     }
 
     private void togglePet() {
-        if (PetService.showing()) {
+        DesktopRuntime.queryPet();
+        if (DesktopRuntime.petShowing()) {
             stopService(new Intent(this, PetService.class));
         } else if (!importing && store.active() != null) {
             if (Settings.canDrawOverlays(this)) launchPet();
@@ -441,19 +440,19 @@ public final class MainActivity extends Activity {
         }
     }
 
-    boolean chooseSceneFile(ValueCallback<Uri[]> callback) {
+    boolean chooseSceneFile(ValueCallback<Uri[]> callback, boolean video) {
         if (scenePicker != null) scenePicker.onReceiveValue(null);
         scenePicker = callback;
         externalPicker = true;
         setSettingsVisible(settingsVisible);
-        // The system picker accepts both photos and videos when no MIME type is set.
-        if (launchPicker(new Intent(MediaStore.ACTION_PICK_IMAGES), SCENE_FILE)) return true;
-        Intent fallback = new Intent(SYSTEM_PHOTO_PICKER);
+        String mediaType = video ? "video/*" : "image/*";
+        if (launchPicker(new Intent(MediaStore.ACTION_PICK_IMAGES).setType(mediaType), SCENE_FILE)) return true;
+        Intent fallback = new Intent(SYSTEM_PHOTO_PICKER).setType(mediaType);
         ResolveInfo systemPicker = getPackageManager().resolveActivity(fallback, PackageManager.MATCH_SYSTEM_ONLY);
         if (systemPicker != null && launchPicker(fallback.setClassName(
                 systemPicker.activityInfo.packageName, systemPicker.activityInfo.name), SCENE_FILE)) return true;
-        Intent files = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE)
-                .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"image/png", "image/jpeg", "image/webp", "video/mp4"})
+        Intent files = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType(mediaType).addCategory(Intent.CATEGORY_OPENABLE)
+                .putExtra(Intent.EXTRA_MIME_TYPES, video ? new String[] {"video/mp4"} : new String[] {"image/png", "image/jpeg", "image/webp"})
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         if (launchPicker(files, SCENE_FILE)) return true;
         scenePicker.onReceiveValue(null);
@@ -761,7 +760,12 @@ public final class MainActivity extends Activity {
 
     private void setSettingsVisible(boolean visible) {
         settingsVisible = visible;
-        PetService.suspendForSettings(visible || awaitingUsageAccess || externalPicker);
+        updateDesktopVisibility();
+    }
+
+    private void updateDesktopVisibility() {
+        DesktopRuntime.flag("settings", active.get() == this && (resumed && (immersivePreview || settingsVisible)
+                || awaitingUsageAccess || externalPicker));
     }
 
     @Override public void onBackPressed() {
@@ -772,7 +776,7 @@ public final class MainActivity extends Activity {
         if (immersivePreview && player != null) {
             player.view().evaluateJavascript("if(document.documentElement.classList.contains('scene-edit'))"
                     + "{document.querySelector('#scene-back').click();}"
-                    + "else{controlsCollapsed=false;localStorage.setItem('controlsCollapsed','false');updateControlsVisibility();}", null);
+                    + "else{setControlsCollapsed(false);}", null);
             return;
         }
         super.onBackPressed();
@@ -809,10 +813,10 @@ public final class MainActivity extends Activity {
         if (current != null && current.player != null) current.player.status();
     }
 
-    static void receive(JSONObject command) {
+    static void receive(JSONObject command, boolean sound) {
         MainActivity current = active.get();
         if (current != null && current.player != null) {
-            current.player.receive(command, !PetService.visible() && !PetWallpaperService.visible());
+            current.player.receive(command, sound && current.resumed);
         }
     }
 }

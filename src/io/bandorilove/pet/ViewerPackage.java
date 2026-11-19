@@ -16,9 +16,11 @@ final class ViewerPackage {
     }
     private static final Pattern SUBMODEL = Pattern.compile("(?:^|;)\\s*add_submodel\\s+([0-9a-f]{32}\\.bin3?)(?=\\s|;|$)");
     private static final Pattern TEXTURE = Pattern.compile("(?:^|;)\\s*replace_tex\\s+(\\d{1,5})\\s+([0-9a-f]{32}\\.bin3?)(?=\\s|;|$)");
+    private static final Pattern EXPRESSION = Pattern.compile("(?:^|;)\\s*set_exp\\s+([^\\s;]+)");
     private final ModelStore.ZipSource source;
     private final Function mask;
     private final File folder;
+    private final Map<String, String> exported = new HashMap<>();
     private long remaining = ModelStore.MAX_BYTES;
 
     private ViewerPackage(ModelStore.ZipSource source, Function mask, File folder) {
@@ -72,11 +74,9 @@ final class ViewerPackage {
         for (String entry : entries) {
             Parts parts = Parts.read(loader.model(entry));
             if (parts == null) continue;
-            if (parts.carrier) parts = loader.submodel(parts);
-            JSONObject preview = loader.assets(parts);
             String title = workshop == null ? "" : workshop.optString("title");
             if (title.isEmpty()) title = meta.optString("name", "Live2D 模型");
-            return ModelStore.renderOnly(output, title, parts.modern, preview);
+            return loader.importGraph(entry, parts, title);
         }
         throw new IOException("模型包里没有可预览的 Live2D 模型");
     }
@@ -148,20 +148,87 @@ final class ViewerPackage {
         return new JSONObject(text(data, data.length));
     }
 
-    private Parts submodel(Parts root) throws Exception {
-        List<String> commands = root.commands(root.modern ? "Start" : "start");
-        commands.addAll(root.commands("carrier_switch_001"));
-        for (String command : commands) {
-            Matcher match = SUBMODEL.matcher(command);
-            if (match.find() && source.has(match.group(1))) {
-                Parts child = Parts.read(model(match.group(1)));
-                if (child != null) return child;
+    private JSONObject importGraph(String root, Parts first, String title) throws Exception {
+        Map<String, Parts> pending = new LinkedHashMap<>();
+        JSONObject graph = new JSONObject();
+        pending.put(root, first);
+        while (!pending.isEmpty() && graph.length() < 32) {
+            Iterator<Map.Entry<String, Parts>> cursor = pending.entrySet().iterator();
+            Map.Entry<String, Parts> entry = cursor.next();
+            String name = entry.getKey();
+            Parts parts = entry.getValue();
+            cursor.remove();
+            boolean layer = parts.id.endsWith("_hits") || parts.id.endsWith("_menu");
+            JSONObject refs = assets(parts, layer);
+            JSONObject resources = new JSONObject();
+            graph.put(name, new JSONObject().put("id", parts.id).put("modern", parts.modern)
+                    .put("model", refs).put("areas", parts.areas).put("groups", parts.groups)
+                    .put("expressions", parts.expressions).put("resources", resources));
+            Iterator<String> groups = parts.groups.keys();
+            while (groups.hasNext()) {
+                JSONArray rows = parts.groups.optJSONArray(groups.next());
+                if (rows == null) continue;
+                for (int i = 0; i < Math.min(512, rows.length()); i++) {
+                    JSONObject row = rows.optJSONObject(i);
+                    if (row == null) continue;
+                    optional(row.optString(parts.key("File", "file")), parts.modern ? "motion3" : "motion", resources);
+                    optional(row.optString(parts.key("Sound", "sound")), "sound", resources);
+                    String command = row.optString(parts.key("Command", "command"));
+                    Matcher expression = EXPRESSION.matcher(command);
+                    while (expression.find()) optional(expression.group(1), "expression", resources);
+                    Matcher child = SUBMODEL.matcher(command);
+                    while (child.find() && pending.size() < 32) {
+                        String ref = child.group(1);
+                        if (!source.has(ref) || graph.has(ref) || pending.containsKey(ref)) continue;
+                        Parts next = Parts.read(model(ref));
+                        if (next != null) pending.put(ref, next);
+                    }
+                }
+            }
+            for (int i = 0; i < parts.expressions.length(); i++) {
+                JSONObject expression = parts.expressions.optJSONObject(i);
+                if (expression != null) optional(expression.optString(parts.key("File", "file")), "expression", resources);
             }
         }
-        return root;
+        String visible = root;
+        if (first.id.contains("l2d_carrier_")) {
+            List<String> groups = new ArrayList<>();
+            first.groups.keys().forEachRemaining(group -> {
+                if (group.startsWith("carrier_switch_")) groups.add(group);
+            });
+            Collections.sort(groups);
+            groups.add(0, first.key("Start", "start"));
+            find: for (String group : groups) {
+                for (String command : first.commands(group)) {
+                    Matcher match = SUBMODEL.matcher(command);
+                    while (match.find()) {
+                        JSONObject child = graph.optJSONObject(match.group(1));
+                        if (child != null && child.getJSONObject("model").has(
+                                child.getBoolean("modern") ? "Textures" : "textures")) {
+                            visible = match.group(1);
+                            break find;
+                        }
+                    }
+                }
+            }
+        }
+        ModelStore.writeJson(new File(folder, "plain/viewer.json"),
+                new JSONObject().put("root", root).put("initial", visible).put("models", graph));
+        JSONObject selected = graph.getJSONObject(visible);
+        return ModelStore.renderOnly(folder, title, selected.getBoolean("modern"), selected.getJSONObject("model"))
+                .put("viewerPackage", true);
     }
 
-    private JSONObject assets(Parts parts) throws Exception {
+    private void optional(String reference, String kind, JSONObject resources) throws Exception {
+        if (reference.isEmpty() || resources.has(reference)) return;
+        try {
+            resources.put(reference, asset(reference, kind));
+        } catch (IOException ignored) {
+            // An unsupported optional motion or sound does not prevent previewing the model.
+        }
+    }
+
+    private JSONObject assets(Parts parts, boolean layer) throws Exception {
         for (String command : parts.commands(parts.modern ? "Start" : "start")) {
             Matcher match = TEXTURE.matcher(command);
             while (match.find()) {
@@ -172,20 +239,23 @@ final class ViewerPackage {
             }
         }
         JSONObject result = new JSONObject().put(parts.mocKey, asset(parts.refs.getString(parts.mocKey),
-                "model", parts.modern ? "moc3" : "moc"));
+                parts.modern ? "moc3" : "moc"));
+        if (layer) return result;
         JSONArray textures = new JSONArray();
         for (int i = 0; i < parts.textures.size(); i++) {
-            textures.put(asset(parts.textures.get(i), "texture-" + i, "texture"));
+            textures.put(asset(parts.textures.get(i), "texture"));
         }
         result.put(parts.modern ? "Textures" : "textures", textures);
         for (String key : parts.modern ? List.of("Physics", "Pose") : List.of("physics", "pose")) {
-            if (parts.refs.has(key)) result.put(key, asset(parts.refs.getString(key), key.toLowerCase(Locale.ROOT), "json"));
+            if (parts.refs.has(key)) result.put(key, asset(parts.refs.getString(key), "json"));
         }
         return result;
     }
 
-    private String asset(String reference, String label, String kind) throws Exception {
+    private String asset(String reference, String kind) throws Exception {
         String name = ModelStore.relative(reference);
+        String cacheKey = kind + ":" + name;
+        if (exported.containsKey(cacheKey)) return exported.get(cacheKey);
         byte[] key = mask.forMember(name);
         byte[] buffer = new byte[128 * 1024];
         File root = new File(folder, "plain");
@@ -198,9 +268,10 @@ final class ViewerPackage {
                 count += n;
             }
             decode(buffer, count, key, 0);
-            String file = label + suffix(buffer, count, kind);
+            String file = "resource-" + exported.size() + suffix(buffer, count, kind);
             long offset = 0;
-            try (OutputStream out = new FileOutputStream(new File(root, file))) {
+            File target = new File(root, file);
+            try (OutputStream out = new FileOutputStream(target)) {
                 while (count >= 0) {
                     remaining -= count;
                     if (remaining < 0) throw new IOException("模型资源超过 2 GB");
@@ -209,7 +280,11 @@ final class ViewerPackage {
                     offset += count;
                     count = packed.read(buffer);
                 }
+            } catch (IOException failure) {
+                target.delete();
+                throw failure;
             }
+            exported.put(cacheKey, file);
             return file;
         }
     }
@@ -220,6 +295,14 @@ final class ViewerPackage {
             if (kind.equals("moc3") && magic.equals("MOC3")) return ".moc3";
             if (kind.equals("moc") && magic.startsWith("moc")) return ".moc";
             if (kind.equals("json") && text(data, count).trim().startsWith("{")) return ".json";
+            if (kind.equals("motion3") && text(data, count).trim().startsWith("{")) return ".motion3.json";
+            if (kind.equals("expression") && text(data, count).trim().startsWith("{")) return ".exp3.json";
+            if (kind.equals("motion") && !text(data, count).contains("\0")) return ".mtn";
+            if (kind.equals("sound")) {
+                if (count >= 12 && magic.equals("RIFF") && new String(data, 8, 4, StandardCharsets.US_ASCII).equals("WAVE")) return ".wav";
+                if (magic.equals("OggS")) return ".ogg";
+                if (magic.startsWith("ID3") || (data[0] & 255) == 255 && (data[1] & 224) == 224) return ".mp3";
+            }
             if (kind.equals("texture")) {
                 if (magic.equals("\u0089PNG")) return ".png";
                 if ((data[0] & 255) == 255 && (data[1] & 255) == 216 && (data[2] & 255) == 255) return ".jpg";
@@ -231,14 +314,23 @@ final class ViewerPackage {
 
     private static final class Parts {
         final boolean modern;
-        final boolean carrier;
+        final String id;
         final JSONObject refs;
+        final JSONObject groups;
+        final JSONArray areas;
+        final JSONArray expressions;
         final String mocKey;
         final List<String> textures;
-        private Parts(boolean modern, boolean carrier, JSONObject refs, String mocKey, List<String> textures) {
+        private Parts(boolean modern, String id, JSONObject raw, JSONObject refs, String mocKey, List<String> textures) {
             this.modern = modern;
-            this.carrier = carrier;
+            this.id = id;
             this.refs = refs;
+            JSONObject motionGroups = refs.optJSONObject(key("Motions", "motions"));
+            groups = motionGroups == null ? new JSONObject() : motionGroups;
+            JSONArray hitAreas = raw.optJSONArray(key("HitAreas", "hit_areas"));
+            areas = hitAreas == null ? new JSONArray() : hitAreas;
+            JSONArray definitions = refs.optJSONArray(key("Expressions", "expressions"));
+            expressions = definitions == null ? new JSONArray() : definitions;
             this.mocKey = mocKey;
             this.textures = textures;
         }
@@ -252,13 +344,14 @@ final class ViewerPackage {
             List<String> textureFiles = new ArrayList<>();
             for (int i = 0; i < textures.length(); i++) textureFiles.add(textures.getString(i));
             JSONObject options = model.optJSONObject(modern ? "Options" : "options");
-            boolean carrier = options != null && options.optString(modern ? "Id" : "id").contains("l2d_carrier_");
-            return new Parts(modern, carrier, refs, moc, textureFiles);
+            String id = options == null ? "" : options.optString(modern ? "Id" : "id");
+            return new Parts(modern, id, model, refs, moc, textureFiles);
         }
+        String key(String modernKey, String legacyKey) { return modern ? modernKey : legacyKey; }
+
         List<String> commands(String group) throws Exception {
             List<String> result = new ArrayList<>();
-            JSONObject groups = refs.optJSONObject(modern ? "Motions" : "motions");
-            JSONArray entries = groups == null ? null : groups.optJSONArray(group);
+            JSONArray entries = groups.optJSONArray(group);
             if (entries != null) for (int i = 0; i < entries.length(); i++) {
                 JSONObject entry = entries.getJSONObject(i);
                 result.add(entry.optString(modern ? "Command" : "command"));

@@ -42,7 +42,8 @@ final class ModelStore {
     }
 
     File active() {
-        String name = prefs.getString("active", "");
+        String name = DesktopRuntime.isDesktop() ? DesktopRuntime.read(context, "active") : null;
+        if (name == null) name = prefs.getString("active", "");
         File folder = savedFolder(name);
         return folder != null && new File(folder, "session.json").isFile() ? folder : null;
     }
@@ -119,8 +120,12 @@ final class ModelStore {
             throw new IOException("模型资源已失效，请重新导入。", error);
         }
         if (!prefs.edit().putString("active", id).commit()) throw new IOException("无法切换模型");
-        if (costume >= 0 && catalog.has("id")) context.getSharedPreferences("player", Context.MODE_PRIVATE)
-                .edit().putInt("costume:" + catalog.optString("id"), costume).apply();
+        if (costume >= 0 && catalog.has("id")) {
+            String key = "costume:" + catalog.optString("id");
+            if (catalog.optString("id").matches("[A-Za-z0-9_-]{1,80}")) DesktopRuntime.write(context, key, Integer.toString(costume));
+            context.getSharedPreferences("player", Context.MODE_PRIVATE).edit().putInt(key, costume).apply();
+        }
+        DesktopRuntime.write(context, "active", id);
     }
 
     private static void checkSavedAsset(File folder, String modelPath, String reference) throws IOException {
@@ -133,8 +138,10 @@ final class ModelStore {
         File folder = savedFolder(id);
         if (folder == null) throw new IOException("模型记录无效");
         android.content.SharedPreferences.Editor edit = prefs.edit().remove("saved:" + id);
-        if (id.equals(prefs.getString("active", ""))) edit.remove("active");
+        boolean active = id.equals(prefs.getString("active", ""));
+        if (active) edit.remove("active");
         if (!edit.commit()) throw new IOException("无法删除模型记录");
+        if (active) DesktopRuntime.write(context, "active", "");
         delete(folder);
     }
 
@@ -225,6 +232,7 @@ final class ModelStore {
                 throw new IOException("无法保存当前模型");
             }
             installed = true;
+            DesktopRuntime.write(context, "active", staged.getName());
         } finally {
             if (!installed) delete(staged);
         }

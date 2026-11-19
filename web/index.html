@@ -6,6 +6,9 @@
   <title>BandoriLovePet</title>
   <link rel="icon" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
+  <script defer src="/performance.js"></script>
+  <script defer src="/theme.js"></script>
+  <script defer src="/viewer-interaction.js"></script>
   <script defer src="/app.js"></script>
   <script defer src="/scene.js"></script>
   <script defer src="/library.js"></script>
@@ -33,7 +36,11 @@
     <section id="player" hidden>
       <div class="title-row">
         <div><p id="source"></p><h1 id="name"></h1></div>
-        <div class="pet-actions"><button id="toggle" class="primary" disabled>显示桌宠</button><button id="apply-wallpaper" disabled>显示壁纸</button></div>
+        <div class="pet-actions" role="group" aria-label="预览开关">
+          <button id="performance-toggle" type="button" aria-pressed="false" hidden disabled>演出</button>
+          <button id="toggle" type="button" aria-pressed="false" disabled>桌宠</button>
+          <button id="apply-wallpaper" type="button" aria-pressed="false" disabled>壁纸</button>
+        </div>
       </div>
       <div id="stage">
         <div id="scene-layers" aria-hidden="true"></div>
@@ -67,6 +74,8 @@
     </header>
     <div class="settings-content">
       <button id="edit-scene" class="scene-entry"><span>壁纸设置</span><small>背景 · 角色 · 特效</small><span aria-hidden="true">›</span></button>
+      <button id="open-performance" class="scene-entry" type="button" aria-haspopup="dialog" aria-controls="performance-settings" hidden><span>演出设置</span><small>衣装 · 动作 · 表情 · 语音</small><span aria-hidden="true">›</span></button>
+      <button id="open-theme" class="scene-entry" type="button" aria-haspopup="dialog" aria-controls="theme-settings"><span>主题配色</span><small id="theme-current"></small><span aria-hidden="true">›</span></button>
       <button id="open-permissions" class="scene-entry" aria-haspopup="dialog"><span>权限配置</span><small>桌宠 · 通知 · 壁纸</small><span aria-hidden="true">›</span></button>
       <fieldset class="placement-options">
         <legend>桌宠显示位置</legend>
@@ -76,7 +85,7 @@
         </label>
         <label class="placement-option">
           <input type="radio" name="pet-placement" id="mode-home" value="home">
-          <span>仅在主屏幕显示</span>
+          <span>在主屏幕显示</span>
         </label>
       </fieldset>
       <div id="usage-access" role="status" hidden>
@@ -90,18 +99,66 @@
           <span class="switch-track" aria-hidden="true"></span>
         </label>
         <label class="settings-switch">
-          <span><strong>互动仅收藏</strong><small>点角色时只播放已收藏的内容</small></span>
+          <span><strong>互动收藏</strong><small>点角色时只播放已收藏的内容</small></span>
           <input type="checkbox" id="favorite-interactions" role="switch">
           <span class="switch-track" aria-hidden="true"></span>
         </label>
       </div>
       <div class="settings-switches">
         <label class="settings-switch">
-          <span><strong>显示字幕卡</strong><small>预览、桌宠和动态壁纸中的语音字幕</small></span>
+          <span><strong>触控菜单</strong><small id="touch-menu-hint">点击角色腿部打开菜单</small></span>
+          <input type="checkbox" id="touch-menu" role="switch" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label class="settings-switch">
+          <span><strong>显示字幕</strong><small>预览、桌宠和动态壁纸中的语音字幕</small></span>
           <input type="checkbox" id="caption-cards" role="switch" checked>
           <span class="switch-track" aria-hidden="true"></span>
         </label>
       </div>
+    </div>
+  </dialog>
+  <dialog id="performance-settings" aria-labelledby="performance-title">
+    <header class="settings-heading">
+      <img src="/favicon.svg" alt="">
+      <h2 id="performance-title">演出设置</h2>
+      <button type="button" class="dialog-close" data-close-performance aria-label="关闭演出设置">×</button>
+    </header>
+    <form class="settings-content">
+      <fieldset class="performance-fields">
+        <label class="settings-switch">
+          <span><strong>演出模式</strong><small>点上身依次播放当前衣装的演出</small></span>
+          <input name="enabled" type="checkbox" role="switch">
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <div class="performance-field"><label for="performance-costume">衣装</label><select name="costume" hidden></select><button id="performance-costume" type="button" class="performance-choice" data-performance-choose="costume" data-label="衣装" aria-haspopup="dialog" aria-controls="performance-options"><span></span></button></div>
+        <div class="performance-field">
+          <label for="performance-preset">演出组</label><select name="preset" hidden></select>
+          <div class="performance-picker"><button id="performance-preset" type="button" class="performance-choice" data-performance-choose="preset" data-label="演出组" aria-haspopup="dialog" aria-controls="performance-options"><span></span></button><button type="button" class="performance-add" data-add-performance aria-label="新增演出" title="新增演出">+</button></div>
+        </div>
+        <label class="performance-field">演出名称<input type="text" name="presetName" maxlength="60" required></label>
+        <div class="performance-field"><label for="performance-action">动作</label><select name="action" hidden></select><button id="performance-action" type="button" class="performance-choice" data-performance-choose="action" data-label="动作" aria-haspopup="dialog" aria-controls="performance-options"><span></span></button></div>
+        <div class="performance-field"><label for="performance-expression">表情</label><select name="expression" hidden></select><button id="performance-expression" type="button" class="performance-choice" data-performance-choose="expression" data-label="表情" aria-haspopup="dialog" aria-controls="performance-options"><span></span></button></div>
+        <div class="performance-field"><label for="performance-voice">语音</label><select name="voice" hidden></select><button id="performance-voice" type="button" class="performance-choice" data-performance-choose="voice" data-label="语音" aria-haspopup="dialog" aria-controls="performance-options"><span></span></button></div>
+        <p role="status" class="performance-status"></p>
+        <div class="performance-actions">
+          <button type="button" data-clear-performance>删除这组</button>
+          <button type="submit" class="primary">保存演出</button>
+        </div>
+      </fieldset>
+    </form>
+    <p class="performance-toast" data-performance-toast role="status" hidden></p>
+  </dialog>
+  <dialog id="performance-options" aria-labelledby="performance-options-title">
+    <header class="settings-heading">
+      <img src="/favicon.svg" alt="">
+      <h2 id="performance-options-title"></h2>
+      <button type="button" class="dialog-close" data-close-options aria-label="关闭选择" autofocus>×</button>
+    </header>
+    <div class="settings-content performance-option-body">
+      <input type="search" data-option-search placeholder="搜索选项" aria-label="搜索选项" hidden>
+      <ul class="performance-option-list" aria-labelledby="performance-options-title"></ul>
+      <p class="performance-status" data-option-empty role="status" hidden>没有匹配的选项</p>
     </div>
   </dialog>
   <dialog id="permission-config" aria-labelledby="permission-config-title">
@@ -117,7 +174,7 @@
         <button data-permission="overlay">去设置</button>
       </div>
       <div class="permission-row">
-        <div><strong>使用情况访问</strong><p>桌宠选择「仅在主屏幕显示」时需要。</p></div>
+        <div><strong>使用情况访问</strong><p>桌宠选择「在主屏幕显示」时需要。</p></div>
         <span class="permission-state" id="perm-usage">正在检查</span>
         <button data-permission="usage">去设置</button>
       </div>
@@ -127,7 +184,7 @@
         <button data-permission="notifications">去设置</button>
       </div>
       <div class="permission-row">
-        <div><strong>动态壁纸</strong><p id="perm-wallpaper-detail">点「显示壁纸」后在系统页面选择主屏幕。</p></div>
+        <div><strong>动态壁纸</strong><p id="perm-wallpaper-detail">点首页的「壁纸」后，在系统页面选择主屏幕。</p></div>
         <span class="permission-state" id="perm-wallpaper">正在检查</span>
         <button data-permission="wallpaper">应用信息</button>
       </div>
@@ -168,34 +225,27 @@
     </header>
     <div class="scene-sheet">
       <div class="scene-scroll">
-      <details class="scene-section" id="scene-library-section">
-        <summary>壁纸配置</summary>
-        <div class="scene-add">
-          <button id="scene-save-preset">保存当前配置</button>
-          <button id="scene-open-presets">已保存的壁纸</button>
-        </div>
-      </details>
-      <details id="scene-stack-section" class="scene-section" open>
-      <summary>图层<span>上方图层显示在前</span></summary>
-      <p class="scene-gesture-hint">选中图层后，单指拖动 · 双指缩放</p>
-      <ol id="scene-stack"></ol>
-      </details>
       <details id="scene-material-section" class="scene-section">
-      <summary>素材与特效<span>背景 · 图片 · 视频 · 12 种特效</span></summary>
+      <summary>素材特效</summary>
       <div class="scene-add">
-        <button id="scene-add-image">＋ 图片 / 视频</button>
-        <button id="scene-add-background">＋ 配色</button>
+        <button id="scene-add-image">添加图片</button>
+        <button id="scene-add-video">添加视频</button>
         <button id="scene-add-effect">＋ 特效</button>
       </div>
       <div id="scene-choices" hidden><p id="scene-choices-title"></p><div id="scene-choice-grid"></div></div>
-      <input id="scene-file" type="file" accept="image/png,image/jpeg,image/webp,video/mp4" hidden>
+      <input id="scene-image-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+      <input id="scene-video-file" type="file" accept="video/mp4" hidden>
+      </details>
+      <details id="scene-stack-section" class="scene-section" open>
+      <summary>图层排序</summary>
+      <p class="scene-gesture-hint">选中图层后，单指拖动 · 双指缩放</p>
+      <ol id="scene-stack"></ol>
       </details>
       <details id="scene-adjust-section" class="scene-section">
-      <summary>图层调整<span id="scene-selection-hint">角色</span></summary>
+      <summary>图层调整</summary>
       <fieldset id="scene-adjust">
         <legend id="scene-selected">角色</legend>
-        <div id="scene-palette" aria-label="背景配色"></div>
-        <p id="scene-base-note" hidden>原来的角色背景固定保留在底层。添加图片、视频或配色即可覆盖，删除后自动恢复。</p>
+        <p id="scene-base-note" hidden>原来的角色背景固定保留在底层。添加图片或视频即可覆盖，删除后自动恢复。</p>
         <label id="scene-opacity-row">透明度<input id="scene-opacity" type="range" min="0" max="100"><output id="scene-opacity-value"></output></label>
         <label id="scene-scale-row">大小<input id="scene-scale" type="range" min="30" max="300"><output id="scene-scale-value"></output></label>
         <div class="scene-position">
@@ -203,6 +253,13 @@
           <label>上下<input id="scene-y" type="range" min="-80" max="80"></label>
         </div>
       </fieldset>
+      </details>
+      <details class="scene-section" id="scene-library-section">
+        <summary>壁纸配置</summary>
+        <div class="scene-add">
+          <button id="scene-save-preset">保存当前配置</button>
+          <button id="scene-open-presets">已保存的壁纸</button>
+        </div>
       </details>
       <p id="scene-message" role="status" hidden></p>
       </div>
@@ -219,5 +276,9 @@
     <button id="pet-reset">恢复待机</button>
     <button id="exit-pet">退出桌宠</button>
   </div>
+  <dialog id="theme-settings" class="voice-dialog" aria-labelledby="theme-title">
+    <div class="dialog-heading theme-heading"><h2 id="theme-title">主题配色</h2><button id="theme-close" class="dialog-close" type="button" aria-label="关闭主题配色" autofocus>×</button></div>
+    <div id="theme-grid"></div>
+  </dialog>
 </body>
 </html>

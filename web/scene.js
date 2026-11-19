@@ -41,20 +41,22 @@
   }
   let layers;
   try {
-    layers = normalize(JSON.parse(localStorage.getItem(key)));
+    layers = normalize(JSON.parse(wallpaper ? native.desktopSetting(key) : localStorage.getItem(key)));
   } catch { layers = defaults(); }
   let selected = "character", visible = true, engine;
+  let publishTimer, publishing = Promise.resolve();
   const nodes = new Map(), urls = new Map();
   const effects = new Map();
   const identifier = () => Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
   const host = $("#scene-layers");
-  const database = new Promise((resolve, reject) => {
+  const database = !wallpaper && new Promise((resolve, reject) => {
     const request = indexedDB.open("wallpaper-media", 1);
     request.onupgradeneeded = () => request.result.createObjectStore("files");
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
   function media(id, value) {
+    if (wallpaper) return fetch("/wallpaper-media/" + encodeURIComponent(id)).then(res => res.ok ? res.blob() : null);
     return database.then(db => new Promise((resolve, reject) => {
       const tx = db.transaction("files", value ? "readwrite" : "readonly");
       const store = tx.objectStore("files");
@@ -64,6 +66,7 @@
     }));
   }
   function removeMedia(id) {
+    native.removeWallpaperMedia(id);
     return database.then(db => new Promise((resolve, reject) => {
       const tx = db.transaction("files", "readwrite");
       tx.objectStore("files").delete(id);
@@ -99,7 +102,40 @@
     try { localStorage.setItem(key, JSON.stringify(layers)); }
     catch { message("场景保存失败，请检查可用存储空间。"); return false; }
     window.dispatchEvent(new Event("wallpaper-scene-saved"));
+    clearTimeout(publishTimer);
+    publishTimer = setTimeout(() => publishScene().catch(console.error), 150);
     return true;
+  }
+
+  async function copyMedia(id) {
+    if (native.hasWallpaperMedia(id)) return;
+    const blob = await media(id);
+    if (!blob || !native.beginWallpaperMedia(id, blob.type, blob.size)) throw new Error("无法准备壁纸素材，请检查文件和可用空间。");
+    const chunkSize = 192 * 1024;
+    try {
+      for (let offset = 0; offset < blob.size; offset += chunkSize) {
+        const data = new Uint8Array(await blob.slice(offset, offset + chunkSize).arrayBuffer());
+        let text = "";
+        for (let index = 0; index < data.length; index += 4096) text += String.fromCharCode(...data.subarray(index, index + 4096));
+        if (!native.appendWallpaperMedia(btoa(text))) throw new Error("无法写入壁纸素材，请检查可用空间。");
+      }
+      if (!native.finishWallpaperMedia()) throw new Error("无法保存壁纸素材。");
+    } catch (error) {
+      native.finishWallpaperMedia();
+      throw error;
+    }
+  }
+
+  function publishScene() {
+    clearTimeout(publishTimer);
+    publishing = publishing.catch(() => {}).then(async () => {
+      const scene = layers;
+      const encoded = JSON.stringify(scene);
+      if (native.desktopSetting(key) === encoded) return;
+      for (const layer of scene) if (layer.media) await copyMedia(layer.media);
+      if (encoded === JSON.stringify(layers) && !native.setDesktopSetting(key, encoded)) throw new Error("壁纸场景保存失败，请检查可用空间。");
+    });
+    return publishing;
   }
   function applyNode(layer, node, index) {
     node.style.zIndex = index + 1;
@@ -253,7 +289,6 @@
   function editSelected() {
     const layer = current();
     $("#scene-selected").textContent = layer.name;
-    $("#scene-selection-hint").textContent = layer.name;
     for (const [name, value] of [["opacity", layer.opacity * 100], ["scale", layer.scale * 100], ["x", layer.x * 100], ["y", layer.y * 100]]) {
       $("#scene-" + name).value = Math.round(value);
     }
@@ -262,8 +297,6 @@
     $("#scene-scale-row").hidden = $(".scene-position").hidden = layer.kind === "background";
     $("#scene-opacity-row").hidden = isBase(layer);
     $("#scene-base-note").hidden = !isBase(layer);
-    $("#scene-palette").hidden = layer.kind !== "background" || isBase(layer);
-    for (const button of $("#scene-palette").children) button.setAttribute("aria-pressed", String(button.dataset.color === layer.color));
   }
   function drawStack() {
     const fragment = document.createDocumentFragment();
@@ -328,13 +361,6 @@
     $("#scene-preview").setAttribute("aria-pressed", String(on));
     if (!on) showPetMenu(false);
   };
-  for (const [color, [name, background]] of Object.entries(palettes)) {
-    if (color === "default") continue;
-    const choice = button(name, "scene-swatch", () => { current().color = color; current().name = name + "背景"; update(); });
-    choice.style.setProperty("--swatch", background);
-    choice.dataset.color = color;
-    $("#scene-palette").append(choice);
-  }
   for (const name of ["opacity", "scale", "x", "y"]) {
     $("#scene-" + name).oninput = (event) => {
       if (isBase(current())) return;
@@ -343,44 +369,29 @@
     };
     $("#scene-" + name).onchange = save;
   }
-  function addLayer(kind, properties) {
+  function addEffect(effect, name) {
     if (layers.length >= 12) return message("最多可放置 12 个图层。");
-    if (kind === "effect" && layers.filter(layer => layer.kind === "effect").length >= 3) return message("最多同时使用 3 层特效，减少发热与耗电。");
-    const layer = { id: identifier(), kind, opacity: kind === "effect" ? .8 : 1, visible: true, scale: 1, x: 0, y: 0, ...properties };
-    if (kind === "background") layers.splice(Math.max(1, layers.findIndex(item => item.kind === "character")), 0, layer);
-    else layers.push(layer);
+    if (layers.filter(layer => layer.kind === "effect").length >= 3) return message("最多同时使用 3 层特效，减少发热与耗电。");
+    const layer = { id: identifier(), kind: "effect", effect, name, opacity: .8, visible: true, scale: 1, x: 0, y: 0 };
+    layers.push(layer);
     selected = layer.id; $("#scene-choices").hidden = true; update(); message();
   }
-  function chooseLayer(kind) {
+  $("#scene-add-effect").onclick = () => {
     const choices = $("#scene-choices");
-    if (!choices.hidden && choices.dataset.kind === kind) { choices.hidden = true; return; }
-    choices.dataset.kind = kind;
-    $("#scene-choices-title").textContent = kind === "effect" ? "选择特效" : "选择背景配色";
-    const grid = $("#scene-choice-grid"); grid.textContent = "";
-    function appendChoice(target, type, name, background) {
-      const choice = button(name, "scene-choice", () => addLayer(kind,
-        kind === "effect" ? { effect: type, name } : { color: type, name: name + "背景" }));
-      choice.dataset.type = type;
-      if (background) {
-        choice.classList.add("scene-swatch");
-        choice.style.setProperty("--swatch", background);
-      }
-      target.append(choice);
+    choices.hidden = !choices.hidden;
+    if (choices.hidden) return;
+    $("#scene-choices-title").textContent = "选择特效";
+    const grid = $("#scene-choice-grid");
+    const content = document.createElement("div");
+    content.className = "scene-choice-grid";
+    for (const [effect, name] of Object.entries(effectNames)) {
+      const choice = button(name, "scene-choice", () => addEffect(effect, name));
+      choice.dataset.type = effect;
+      content.append(choice);
     }
-    if (kind === "effect") {
-      const content = document.createElement("div"); content.className = "scene-choice-grid";
-      for (const [type, name] of Object.entries(effectNames)) appendChoice(content, type, name);
-      grid.append(content);
-    } else {
-      const content = document.createElement("div"); content.className = "scene-choice-grid";
-      for (const [color, [name, background]] of Object.entries(palettes)) if (color !== "default") appendChoice(content, color, name, background);
-      grid.append(content);
-    }
-    choices.hidden = false;
+    grid.replaceChildren(content);
     choices.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }
-  $("#scene-add-effect").onclick = () => chooseLayer("effect");
-  $("#scene-add-background").onclick = () => chooseLayer("background");
+  };
   // Keep the framebuffer size steady during gestures.
   const stage = $("#stage"), fingers = new Map();
   let gesture;
@@ -423,13 +434,18 @@
   stage.addEventListener("pointerup", endGesture);
   stage.addEventListener("pointercancel", endGesture);
   stage.addEventListener("lostpointercapture", endGesture);
-  $("#scene-add-image").onclick = () => $("#scene-file").click();
-  $("#scene-file").onchange = async (event) => {
+  for (const type of ["image", "video"]) {
+    const picker = $("#scene-" + type + "-file");
+    $("#scene-add-" + type).onclick = () => picker.click();
+    picker.onchange = (event) => importMedia(event, type);
+  }
+  async function importMedia(event, type) {
     const file = event.target.files[0];
     event.target.value = "";
     if (!file) return;
     if (layers.length >= 12) return message("最多可放置 12 个图层。");
-    if (!["image/png", "image/jpeg", "image/webp", "video/mp4"].includes(file.type)) return message("请选择 PNG、JPG、WebP 或 MP4 文件。");
+    const supported = type === "video" ? file.type === "video/mp4" : ["image/png", "image/jpeg", "image/webp"].includes(file.type);
+    if (!supported) return message(type === "video" ? "请选择 MP4 视频。" : "请选择 PNG、JPG 或 WebP 图片。");
     if (file.size > 64 * 1024 * 1024) return message("单个素材请控制在 64 MB 以内。");
     const id = identifier();
     try {
@@ -442,29 +458,51 @@
       console.error("Scene media import failed", error);
       message("素材读取或保存失败，请重新选择文件。");
     }
-  };
-  $("#apply-wallpaper").onclick = $("#welcome-wallpaper").onclick = () => {
+  }
+  $("#apply-wallpaper").onclick = $("#welcome-wallpaper").onclick = async () => {
     if (wallpaperApplied || save()) {
       wallpaperChanging = true;
       updateWallpaperButton();
-      native.applyWallpaper();
+      try {
+        if (!wallpaperApplied) await publishScene();
+        native.applyWallpaper();
+      } catch (error) {
+        wallpaperChanging = false;
+        updateWallpaperButton();
+        showAppNotice(error.message);
+      }
     }
     else showAppNotice("壁纸场景保存失败，请检查可用存储空间。");
   };
   $("#scene-apply").onclick = () => {
     save(); $("#scene-back").click();
-    controlsCollapsed = true;
-    localStorage.setItem("controlsCollapsed", "true");
-    window.dispatchEvent(new Event("scene-editor-change"));
+    setControlsCollapsed(true);
   };
   window.addEventListener("storage", event => {
     if (event.key !== key || !event.newValue) return;
-    try { layers = normalize(JSON.parse(event.newValue)); render(); if (!$("#scene-editor").hidden) drawStack(); } catch {}
+    try {
+      layers = normalize(JSON.parse(event.newValue));
+      render();
+      if (!$("#scene-editor").hidden) drawStack();
+      scheduleWallpaperFrame();
+    } catch {}
   });
   document.addEventListener("visibilitychange", () => setVisible(!document.hidden && (!wallpaper || wallpaperVisible)));
   window.sceneLayers = {
     setVisible, get layers() { return JSON.parse(JSON.stringify(layers)); }, open: openEditor,
+    mediaReady: () => layers.every(layer => {
+      if (!layer.visible || layer.opacity <= 0 || !layer.media) return true;
+      const node = nodes.get(layer.id);
+      return layer.kind === "video" ? node?.readyState >= 2 : node?.complete && node.naturalWidth > 0;
+    }),
     media, removeMedia, releaseUnusedMedia, missingMedia, restore,
+    reloadDesktopScene() {
+      if (!wallpaper) return;
+      layers = normalize(JSON.parse(native.desktopSetting(key)));
+      render();
+      scheduleWallpaperFrame();
+    },
   };
   render();
+  if (!wallpaper) publishScene().catch(console.error);
 })();

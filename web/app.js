@@ -5,10 +5,13 @@ const native = window.AndroidPet;
 const pet = new URLSearchParams(location.search).get("pet") === "1";
 const wallpaper = new URLSearchParams(location.search).get("wallpaper") === "1";
 let wallpaperVisible = true;
+let wallpaperFrameTimer;
 const names = { action: "动作", expression: "表情", costume: "衣装", voice: "语音" };
 const view = { session: null, costume: null, model: null, app: null, generation: 0, tab: "action" };
 const caption = $("#caption");
 let captionCardsEnabled = native.captionCardsEnabled();
+let touchMenuEnabled = native.touchMenuEnabled();
+let thirdPartyMenuEnabled = native.thirdPartyMenuEnabled();
 const captionStage = $("#stage");
 const petMenu = $("#pet-menu");
 const petMenuButton = $("#pet-menu-button");
@@ -32,7 +35,7 @@ let audioContext, audioNode, analyser, samples;
 let voiceGeneration = 0;
 let mouth = 0;
 let engines;
-let menuHintTimer;
+const performanceCursor = new Map();
 const previewControlTimers = new Map();
 const reportedControls = new Map();
 let previewPress;
@@ -87,6 +90,7 @@ function importProgress(on) {
   busy = on;
   $("#replace").disabled = $("#choose").disabled = on;
   $("#toggle").disabled = on || !view.model;
+  updatePerformanceButton();
   updateWallpaperButton();
   $("#status").classList.remove("error");
   $("#status").textContent = on ? "正在导入模型…" : "";
@@ -94,8 +98,10 @@ function importProgress(on) {
 }
 
 function petStatus(showing, visible, homeOnly) {
-  $("#toggle").textContent = showing ? "退出桌宠" : "显示桌宠";
-  $("#toggle").disabled = busy || !view.model;
+  const button = $("#toggle");
+  button.setAttribute("aria-pressed", String(showing));
+  button.title = showing ? "退出桌宠" : "显示桌宠";
+  button.disabled = busy || !view.model;
   updateWallpaperButton();
   $("#mode-top").checked = !homeOnly;
   $("#mode-home").checked = homeOnly;
@@ -112,8 +118,11 @@ function petStatus(showing, visible, homeOnly) {
 }
 
 function updateWallpaperButton() {
-  $("#apply-wallpaper").disabled = busy || wallpaperChanging || (!view.model && !wallpaperApplied);
-  $("#apply-wallpaper").textContent = wallpaperChanging ? "正在设置…" : wallpaperApplied ? "退出壁纸" : "显示壁纸";
+  const button = $("#apply-wallpaper");
+  button.disabled = busy || wallpaperChanging || (!view.model && !wallpaperApplied);
+  button.setAttribute("aria-pressed", String(wallpaperApplied));
+  button.setAttribute("aria-busy", String(wallpaperChanging));
+  button.title = wallpaperChanging ? "正在设置壁纸" : wallpaperApplied ? "退出壁纸" : "显示壁纸";
   $("#welcome-wallpaper").hidden = !wallpaperApplied;
   $("#welcome-wallpaper").disabled = wallpaperChanging;
 }
@@ -130,7 +139,7 @@ window.setPermissionStatus = (overlay, usage, notifications, wallpaperMode) => {
     status.textContent = granted ? "已允许" : "未允许";
   }
   const messages = {
-    system: ["系统确认", "点「显示壁纸」后选择主屏幕。如果确认后没有切换，请在应用信息中检查是否有「动态壁纸服务」权限。"],
+    system: ["系统确认", "点首页的「壁纸」后选择主屏幕。如果确认后没有切换，请在应用信息中检查是否有「动态壁纸服务」权限。"],
     unsupported: ["系统不支持", "当前设备或用户配置不支持设置壁纸。"],
     restricted: ["系统限制", "当前用户或工作资料的系统策略限制了壁纸设置。"],
   };
@@ -142,6 +151,8 @@ window.setPermissionStatus = (overlay, usage, notifications, wallpaperMode) => {
 function updateControlsVisibility() {
   const limited = view.session?.limited;
   $("#role-settings").hidden = limited;
+  $("#open-performance").hidden = !view.session || limited;
+  updatePerformanceButton();
   $("#controls").hidden = limited || controlsCollapsed;
   document.documentElement.classList.toggle("preview-only", !pet && (limited || controlsCollapsed));
   const immersive = !pet && !wallpaper && !!view.session
@@ -152,6 +163,12 @@ function updateControlsVisibility() {
   }
   revealPreviewControls();
   $("#controls-toggle").checked = !controlsCollapsed;
+}
+
+function setControlsCollapsed(collapsed) {
+  controlsCollapsed = collapsed;
+  localStorage.setItem("controlsCollapsed", String(collapsed));
+  updateControlsVisibility();
 }
 
 function revealPreviewControls(edge) {
@@ -187,6 +204,9 @@ async function refreshModel() {
   try {
     cancelPlayback();
     view.session = session;
+    view.viewer = session.viewerPackage ? await window.viewerInteraction.load(asset("plain/viewer.json")) : null;
+    view.viewerOutfit = view.viewer?.initial;
+    view.viewerCostume = null;
     showFavorites = false;
     const catalog = session.catalog;
     favoriteIds = readFavoriteIds();
@@ -200,7 +220,6 @@ async function refreshModel() {
       reportPetBounds("menu", null);
       reportPetBounds("menuButton", null);
     }
-    clearTimeout(menuHintTimer);
     document.querySelectorAll("#pet-menu [data-loop], #pet-reset").forEach((button) => {
       button.hidden = session.limited;
     });
@@ -209,7 +228,8 @@ async function refreshModel() {
     setTab("action");
     await selectCostume(selected || catalog.costumes[0]);
     window.modelPreviewChanged?.();
-    showMenuHint();
+    updateThirdPartyMenuButton();
+    updateTouchMenuSetting();
     importProgress(false);
     petStatus(native.petShowing(), native.petVisible(), native.homeOnly());
   } catch (error) {
@@ -292,7 +312,8 @@ function makeRenderer() {
   let resizeTimer;
   const readAlpha = makeAlphaSampler(canvas);
   const sampleTouchMask = pet ? makeTouchSampler(readAlpha) : null;
-  PIXI.Ticker.shared.add(() => {
+  const ticker = PIXI.Ticker.shared;
+  ticker.add(() => {
     if ((wallpaper && !wallpaperVisible) || (!wallpaper && document.hidden)) return;
     renderer.render(contents);
     if (sampleTouchMask && overlayVisible && view.model && !pinching) sampleTouchMask(view.model);
@@ -328,7 +349,9 @@ function makeRenderer() {
     }
   });
   resize.observe(stage);
-  return { renderer, stage: contents, screen: renderer.screen, readAlpha };
+  const pause = () => { ticker.autoStart = false; ticker.stop(); };
+  if (wallpaper && !wallpaperVisible) pause();
+  return { renderer, stage: contents, screen: renderer.screen, readAlpha, pause, resume: () => ticker.start() };
 }
 
 const touchColumns = 40, touchRows = 58;
@@ -410,7 +433,7 @@ function placeModel() {
   view.model.scale.set(scale);
   view.model.anchor.set(.5, fitVisible ? .5 : 1);
   view.model.position.set(width * .5, height * (fitVisible ? .5 : .985));
-  const fitted = fitVisible ? fitVisibleModel(width, height) : null;
+  if (fitVisible) fitVisibleModel(width, height);
   if (view.sceneCharacterTransform) {
     const { scale, x, y } = view.sceneCharacterTransform;
     const centerX = width / 2, centerY = height / 2;
@@ -418,12 +441,7 @@ function placeModel() {
     view.model.position.set(centerX + width * x + (view.model.position.x - centerX) * scale,
       centerY + height * y + (view.model.position.y - centerY) * scale);
   }
-  if (pet && view.session.limited) {
-    view.menuAnchor = fitted ? (fitted.top + fitted.height * .36) / height : .36;
-    petMenuButton.style.top = (100 * view.menuAnchor) + "%";
-    if (!petMenuButton.hidden) reportPetBounds("menuButton", petMenuButton.getBoundingClientRect());
-    positionPetMenu();
-  }
+  if (view.session.limited) updateThirdPartyMenuButton();
 }
 
 function setSceneCharacterTransform({ scale, x, y }) {
@@ -455,11 +473,12 @@ async function selectCostume(costume) {
   const generation = ++view.generation;
   $("#loading").hidden = false;
   try {
-    await loadEngine(!costume.cubism3);
+    const packed = await view.viewer?.prepare(view.viewerOutfit);
+    await loadEngine(!(packed?.modern ?? costume.cubism3));
     const file = asset(costume.file);
-    const raw = await data(file);
-    const metadata = preview(raw, costume, file);
-    metadata.url = file;
+    const raw = packed?.metadata || await data(file);
+    const metadata = packed?.metadata || preview(raw, costume, file);
+    if (!packed) metadata.url = file;
     if (!view.app) view.app = makeRenderer();
     const next = await PIXI.live2d.Live2DModel.from(metadata, { autoInteract: false, motionPreload: "NONE" });
     if (generation !== view.generation) {
@@ -473,20 +492,22 @@ async function selectCostume(costume) {
     }
     const outgoing = view.app.stage.removeChildren();
     view.model = next;
+    view.viewerCostume = packed;
     view.visibleFit = null;
     view.costume = costume;
     view.bounds = next.getLocalBounds();
     const controllers = raw[raw.FileReferences ? "Controllers" : "controllers"];
     const sync = controllers?.[raw.FileReferences ? "LipSync" : "lip_sync"];
-    const targets = (sync?.Items || sync?.items || []).map((item) => item.Id || item.id);
+    const targets = metadata.pageMouthIds || (sync?.Items || sync?.items || []).map((item) => item.Id || item.id);
     next.internalModel.on("beforeModelUpdate", () => moveMouth(next, targets));
-    motionFades(next, metadata);
+    if (!packed) motionFades(next, metadata);
     view.app.stage.addChild(next);
     placeModel();
     view.app.renderer.render(view.app.stage);
     for (const model of outgoing) model.destroy({ children: true });
     renderItems();
     updateWallpaperButton();
+    scheduleWallpaperFrame();
   } finally {
     if (generation === view.generation) $("#loading").hidden = true;
   }
@@ -526,7 +547,7 @@ function renderItems() {
       const heart = button(saved ? "♥" : "♡", "heart", () => {
         if (saved) favoriteIds.delete(item.flag);
         else favoriteIds.add(item.flag);
-        localStorage.setItem("favorites:" + view.session.catalog.id, JSON.stringify([...favoriteIds]));
+        writeDesktopSetting("favorites:" + view.session.catalog.id, [...favoriteIds]);
         renderItems();
       });
       heart.setAttribute("aria-label", saved ? "取消收藏" : "收藏");
@@ -554,7 +575,20 @@ function setTab(tab) {
 }
 
 function readFavoriteIds() {
-  return new Set(JSON.parse(localStorage.getItem("favorites:" + view.session.catalog.id) || "[]"));
+  return new Set(JSON.parse(readDesktopSetting("favorites:" + view.session.catalog.id) || "[]"));
+}
+
+function readDesktopSetting(key) {
+  const shared = native.desktopSetting(key);
+  if (shared !== null) return shared;
+  const legacy = localStorage.getItem(key);
+  if (legacy !== null && !pet && !wallpaper && key !== "wallpaper-scene-v1") native.setDesktopSetting(key, legacy);
+  return legacy;
+}
+
+function writeDesktopSetting(key, data) {
+  const value = JSON.stringify(data);
+  if (!native.setDesktopSetting(key, value)) throw new Error("无法保存桌面设置，请检查可用存储空间。");
 }
 
 function updateLoops() {
@@ -577,14 +611,21 @@ function schedule(kind, ms) {
 
 function playRandom(kind, filter = () => true) {
   const list = items(kind).filter(filter);
-  if (!list.length) return;
+  if (!list.length) return false;
   const choices = kind === "costume" && list.length > 1 ? list.filter((item) => item.id !== view.costume?.id) : list;
   send(kind, choices[Math.floor(Math.random() * choices.length)].id);
+  return true;
 }
 
 function playInteraction(kind, filter = () => true) {
   const favorites = native.interactionFavoritesOnly() ? readFavoriteIds() : null;
-  playRandom(kind, (item) => filter(item) && (!favorites || favorites.has(item.flag)));
+  const played = playRandom(kind, (item) => filter(item) && (!favorites || (
+    favorites.has(item.flag) && (kind !== "costume" || item.id !== view.costume?.id)
+  )));
+  if (!played && favorites) {
+    const detail = kind === "costume" ? "请先收藏另一套衣装" : `这个部位暂无已收藏的${names[kind]}`;
+    window.showAppNotice(`已开启「互动收藏」，${detail}`);
+  }
 }
 
 function enableCaptionDrag(card, bounds, report = () => {}) {
@@ -653,7 +694,7 @@ function stopVoice() {
 window.setCaptionCardsEnabled = (enabled) => {
   captionCardsEnabled = enabled;
   $("#caption-cards").checked = enabled;
-  caption.hidden = !enabled || !audioNode;
+  caption.hidden = !enabled || !audioNode || !caption.textContent;
   captionDrag.layout();
 };
 
@@ -667,7 +708,7 @@ async function playVoice(item) {
     samples = new Uint8Array(analyser.fftSize);
     analyser.connect(audioContext.destination);
   }
-  const url = asset(item.file);
+  const url = item.url ?? asset(item.file);
   await audioContext.resume();
   const response = await fetch(url);
   if (!response.ok) throw new Error("语音资源读取失败");
@@ -699,15 +740,86 @@ function moveMouth(model, ids) {
   }
 }
 
+function resetModelExpression() {
+  const manager = view.model?.internalModel.motionManager.expressionManager;
+  if (!manager) return;
+  manager.reserveExpressionIndex = -1;
+  manager.currentExpression = manager.defaultExpression;
+  manager.resetExpression();
+}
+
 function cancelPlayback() {
+  view.performancePlaying = false;
   for (const timer of timers.values()) clearTimeout(timer);
   timers.clear();
   loops.clear();
   stopVoice();
   const manager = view.model?.internalModel.motionManager;
   manager?.stopAllMotions();
-  manager?.expressionManager?.resetExpression();
+  resetModelExpression();
   updateLoops();
+}
+
+function readPerformances(role) {
+  try {
+    const data = JSON.parse(readDesktopSetting("performances:" + role));
+    if (data && typeof data.enabled === "boolean" && data.groups && typeof data.groups === "object") return data;
+  } catch {}
+  return { enabled: false, groups: {} };
+}
+
+function writePerformances(role, update) {
+  const data = readPerformances(role);
+  update(data);
+  writeDesktopSetting("performances:" + role, data);
+}
+
+function updatePerformanceButton() {
+  const button = $("#performance-toggle");
+  const supported = Boolean(view.session && !view.session.limited);
+  button.hidden = !supported;
+  button.disabled = busy || !view.model || !supported;
+  button.setAttribute("aria-pressed", String(supported && readPerformances(view.session.catalog.id).enabled));
+}
+
+function setPerformanceEnabled(role, enabled) {
+  writePerformances(role, (data) => { data.enabled = enabled; });
+  updatePerformanceButton();
+}
+
+function sendPerformance(data) {
+  const { costume } = view;
+  const groups = outfitPerformances(data.groups[costume.flag]);
+  if (!groups.length) return;
+  const cursor = view.session.catalog.id + ":" + costume.flag;
+  const last = performanceCursor.get(cursor) || data.last?.[costume.flag];
+  const chosen = groups[(groups.findIndex((group) => group.id === last) + 1) % groups.length];
+  performanceCursor.set(cursor, chosen.id);
+  send("performance", costume.id, chosen.id);
+}
+
+async function playPerformance(outfit, presetId, sound) {
+  const { costume, model, session } = view;
+  if (session.limited || costume?.id !== outfit || !model || !$("#loading").hidden) return;
+  const { enabled, groups } = readPerformances(session.catalog.id);
+  const group = outfitPerformances(groups[costume.flag]).find((item) => item.id === presetId);
+  if (!enabled || !group) return;
+  const choices = performanceChoices(session.catalog, costume);
+  const tracks = {};
+  for (const kind of performanceTracks) {
+    if (!group.tracks[kind]) continue;
+    const item = choices[kind].find((entry) => entry.flag === group.tracks[kind]);
+    if (!item) return;
+    tracks[kind] = item;
+  }
+  if (!Object.keys(tracks).length) return;
+  cancelPlayback();
+  view.performancePlaying = true;
+  await Promise.all([
+    tracks.action && model.motion("page_" + tracks.action.id, 0, 3),
+    tracks.expression?.file && model.expression(String(tracks.expression.id)),
+    tracks.voice && sound && playVoice(tracks.voice),
+  ]);
 }
 
 async function receiveCommand(command, sound) {
@@ -715,6 +827,7 @@ async function receiveCommand(command, sound) {
   try {
     const { type, id, kind } = command;
     if (type === "reset") return cancelPlayback();
+    if (type === "performance") return await playPerformance(id, kind, sound);
     if (type === "loop" && ["action", "voice", "costume"].includes(kind)) {
       if (id) { loops.add(kind); schedule(kind, 0); }
       else { loops.delete(kind); clearTimeout(timers.get(kind)); }
@@ -723,14 +836,17 @@ async function receiveCommand(command, sound) {
     const item = items(type).find((entry) => entry.id === id);
     if (!item) return;
     if (type === "costume") {
-      if (view.costume?.id !== id) await selectCostume(item);
+      if (view.costume?.id !== id) {
+        if (view.performancePlaying) cancelPlayback();
+        await selectCostume(item);
+      }
       schedule(type, 3800);
     } else if (type === "action") {
       await view.model?.motion("page_" + id, 0, 3);
       schedule(type, Math.max(600, (item.duration || 1) * 1000 + 600));
     } else if (type === "expression") {
       if (item.file) await view.model?.expression(String(id));
-      else view.model?.internalModel.motionManager.expressionManager?.resetExpression();
+      else resetModelExpression();
     } else if (type === "voice" && sound) {
       await playVoice(item);
     }
@@ -760,7 +876,7 @@ function desktopControlArea() {
 window.setDesktopCrop = (...bounds) => {
   desktopCrop = bounds;
   captionDrag.layout();
-  positionPetMenu();
+  updateThirdPartyMenuButton();
 };
 
 function positionPetMenu() {
@@ -770,46 +886,39 @@ function positionPetMenu() {
   petMenu.style.maxHeight = Math.max(0, area.height - 8) + "px";
   const right = area.x + area.width - petMenu.offsetWidth - 4;
   const bottom = area.y + area.height - petMenu.offsetHeight - 4;
-  let left = right;
-  let top = bottom;
-  if (view.session?.limited) {
-    const anchor = captionStage.clientHeight * (view.menuAnchor ?? .36);
-    const gap = 22;
-    top = anchor + gap <= bottom ? anchor + gap : anchor - gap - petMenu.offsetHeight;
-    left = (captionStage.clientWidth - petMenu.offsetWidth) / 2;
-  }
-  petMenu.style.top = Math.max(area.y + 4, Math.min(bottom, top)) + "px";
-  petMenu.style.left = Math.max(area.x + 4, Math.min(right, left)) + "px";
+  petMenu.style.top = Math.max(area.y + 4, bottom) + "px";
+  petMenu.style.left = Math.max(area.x + 4, right) + "px";
   if (pet) reportPetBounds("menu", petMenu.getBoundingClientRect());
 }
 
 function showPetMenu(show = petMenu.hidden) {
   petMenu.hidden = !show;
   if (show) {
-    clearTimeout(menuHintTimer);
     petMenuButton.hidden = true;
     if (pet) reportPetBounds("menuButton", null);
     petMenu.scrollTop = 0;
     positionPetMenu();
   } else {
     if (pet) reportPetBounds("menu", null);
-    showMenuHint();
+    updateThirdPartyMenuButton();
+    scheduleWallpaperFrame();
   }
 }
 
-function showMenuHint() {
-  if ((!pet && !wallpaper) || !view.model || !view.session.limited || !petMenu.hidden) return;
-  petMenuButton.hidden = false;
-  reportPetBounds("menuButton", petMenuButton.getBoundingClientRect());
-  clearTimeout(menuHintTimer);
-  menuHintTimer = setTimeout(() => {
-    petMenuButton.hidden = true;
-    reportPetBounds("menuButton", null);
-  }, 3000);
+function updateThirdPartyMenuButton() {
+  const visible = (pet || wallpaper) && view.model && view.session?.limited && thirdPartyMenuEnabled && petMenu.hidden;
+  petMenuButton.hidden = !visible;
+  if (visible) {
+    const area = desktopControlArea();
+    petMenuButton.style.left = Math.max(area.x + 18, area.x + area.width - 21) + "px";
+    petMenuButton.style.top = Math.max(area.y + 18, area.y + area.height - 21) + "px";
+  }
+  if (pet) reportPetBounds("menuButton", visible ? petMenuButton.getBoundingClientRect() : null);
+  positionPetMenu();
 }
 
 function avatarCoordinates(event) {
-  if (!view.model || view.session.limited || !$("#loading").hidden) return;
+  if (!view.model || !$("#loading").hidden) return;
   const rect = $("#canvas").getBoundingClientRect();
   const x = (event.clientX - rect.left) / rect.width;
   const y = (event.clientY - rect.top) / rect.height;
@@ -824,8 +933,10 @@ function avatarOpaque({ x, y }) {
 function avatarRegion(event) {
   const coordinates = avatarCoordinates(event);
   if (!coordinates) return;
-  const point = view.model.toModelPosition(new PIXI.Point(
-    coordinates.x * view.app.screen.width, coordinates.y * view.app.screen.height));
+  const x = coordinates.x * view.app.screen.width;
+  const y = coordinates.y * view.app.screen.height;
+  if (view.viewerCostume) return view.viewerCostume.hit(view.model, x, y);
+  const point = view.model.toModelPosition(new PIXI.Point(x, y));
   const internal = view.model.internalModel;
   if (view.costume.cubism3) {
     point.x = (point.x - internal.originalWidth / 2) / internal.pixelsPerUnit;
@@ -846,23 +957,52 @@ function avatarRegion(event) {
   if (band && avatarOpaque(coordinates)) return band;
 }
 
-function avatarClick(event) {
-  if (!view.model || !$("#loading").hidden) return;
-  if (view.session.limited) {
-    if ((pet || wallpaper) && !petMenu.hidden) showPetMenu(false);
-    else showMenuHint();
+async function playViewerAction(action) {
+  if (action.outfit) {
+    stopVoice();
+    view.viewerOutfit = action.outfit;
+    await selectCostume(view.costume);
     return;
   }
+  if (action.sound) await playVoice({ url: action.sound, caption: action.text, name: action.text });
+  if (action.expression) await view.model.expression(action.expression);
+  if (action.motion) await view.model.motion(action.motion, 0, 3);
+}
+
+function avatarClick(event) {
+  if (!view.model || !$("#loading").hidden) return;
   const region = avatarRegion(event);
-  if (region === "menu") showPetMenu();
+  if (view.session.limited) {
+    const coordinates = avatarCoordinates(event);
+    const action = region || (coordinates && view.viewerCostume?.hasTap && avatarOpaque(coordinates))
+      ? view.viewerCostume?.choose(region) : null;
+    if (action) playViewerAction(action).catch(error => window.showAppNotice(error.message));
+    return;
+  }
+  if (region === "menu") {
+    if (touchMenuEnabled) showPetMenu();
+  }
   else if (region === "wardrobe") playInteraction("costume");
   else if (region === "voice" || region === "expression") playInteraction(region);
+  else if (region === "body") {
+    const performance = readPerformances(view.session.catalog.id);
+    if (performance.enabled) sendPerformance(performance);
+    else playInteraction("action", (item) => item.category === "body");
+  }
   else if (region) playInteraction("action", (item) => item.category === region);
 }
 
 $("#choose").onclick = () => native.pickModel();
 $("#replace").onclick = () => window.openModelLibrary?.();
 for (const selector of ["#toggle", "#exit-pet"]) $(selector).onclick = () => native.togglePet();
+$("#performance-toggle").onclick = () => {
+  const role = view.session.catalog.id;
+  try {
+    setPerformanceEnabled(role, !readPerformances(role).enabled);
+  } catch (error) {
+    window.showAppNotice(error.message);
+  }
+};
 for (const selector of ["#reset", "#pet-reset"]) $(selector).onclick = () => send("reset");
 $("#open-panel").onclick = () => { showPetMenu(false); native.openPanel(); };
 $("#close-pet-menu").onclick = () => showPetMenu(false);
@@ -873,6 +1013,7 @@ $("#placement").onclick = () => {
   $("#mode-home").checked = homeOnly;
   $("#favorite-interactions").checked = native.interactionFavoritesOnly();
   $("#caption-cards").checked = captionCardsEnabled;
+  updateTouchMenuSetting();
   $("#usage-access").hidden = !homeOnly || native.canUseHomeMode();
   if (!settings.open) {
     native.settingsVisible(true);
@@ -880,6 +1021,21 @@ $("#placement").onclick = () => {
   }
 };
 $("#settings-close").onclick = () => settings.close();
+const openPerformance = createPerformanceEditor({
+  read: () => view.session && !view.session.limited && {
+    catalog: view.session.catalog,
+    costume: view.costume,
+    ...readPerformances(view.session.catalog.id),
+  },
+  setEnabled: setPerformanceEnabled,
+  save: (role, outfit, preset, group) => writePerformances(role, ({ groups }) =>
+    updateOutfitPerformances(groups, outfit, preset, group)),
+  onVisibility: syncAppModalVisibility,
+});
+$("#open-performance").onclick = () => {
+  settings.close();
+  openPerformance();
+};
 const permissions = $("#permission-config");
 $("#open-permissions").onclick = () => {
   if (!permissions.open) permissions.showModal();
@@ -949,9 +1105,7 @@ $("#caption-cards").onchange = (event) => {
   native.setCaptionCardsEnabled(enabled);
 };
 $("#controls-toggle").onchange = (event) => {
-  controlsCollapsed = !event.target.checked;
-  localStorage.setItem("controlsCollapsed", String(controlsCollapsed));
-  updateControlsVisibility();
+  setControlsCollapsed(!event.target.checked);
   settings.close();
 };
 const avatarCanvas = $("#canvas");
@@ -960,7 +1114,7 @@ function endPreviewPress() {
   previewPress = undefined;
 }
 function openPreviewMenu(press) {
-  if (press.opened) return;
+  if (press.opened || !touchMenuEnabled || view.session?.limited) return;
   const coordinates = avatarCoordinates({ clientX: press.x, clientY: press.y });
   if (coordinates && avatarOpaque(coordinates)) {
     press.opened = true;
@@ -1000,8 +1154,25 @@ avatarCanvas.onclick = (event) => {
   }
   avatarClick(event);
 };
+let backgroundTap;
 $("#stage").addEventListener("click", (event) => {
   const root = document.documentElement;
+  if (!pet && !wallpaper && view.model && !view.session.limited && !root.classList.contains("scene-edit")) {
+    const coordinates = event.target.closest("#canvas") && avatarCoordinates(event);
+    const onCharacter = coordinates && (avatarRegion(event) || avatarOpaque(coordinates));
+    const previous = backgroundTap;
+    backgroundTap = null;
+    if (!onCharacter && !event.target.closest("#caption, #pet-menu, button")) {
+      const tap = { x: event.clientX, y: event.clientY, time: event.timeStamp };
+      if (previous && tap.time - previous.time <= 360 && Math.hypot(tap.x - previous.x, tap.y - previous.y) <= 26) {
+        event.preventDefault();
+        event.stopPropagation();
+        setControlsCollapsed(!controlsCollapsed);
+        return;
+      }
+      backgroundTap = tap;
+    }
+  } else backgroundTap = null;
   if (!root.classList.contains("immersive-preview") || root.classList.contains("scene-edit")) return;
   const { top, bottom } = event.currentTarget.getBoundingClientRect();
   const edge = event.clientY < top + 64 ? "top" : event.clientY > bottom - 64 ? "bottom" : null;
@@ -1022,16 +1193,70 @@ document.querySelectorAll("[data-loop]").forEach((node) => {
 
 refreshModel().catch((error) => reportError(error.message));
 
+function scheduleWallpaperFrame() {
+  if (!wallpaper) return;
+  clearTimeout(wallpaperFrameTimer);
+  if (!wallpaperVisible || !view.model) return;
+  const deadline = performance.now() + 1800;
+  const waitForMedia = () => {
+    if (window.sceneLayers?.mediaReady() === false && performance.now() < deadline) {
+      wallpaperFrameTimer = setTimeout(waitForMedia, 80);
+      return;
+    }
+    native.wallpaperFrameReady();
+  };
+  wallpaperFrameTimer = setTimeout(waitForMedia, 0);
+}
+
+window.canCacheWallpaperFrame = () => !!view.model && $("#loading").hidden && caption.hidden
+  && petMenu.hidden && petMenuButton.hidden && window.sceneLayers?.mediaReady() !== false;
+
+function updateTouchMenuSetting() {
+  const thirdParty = Boolean(view.session?.limited);
+  $("#touch-menu").checked = thirdParty ? thirdPartyMenuEnabled : touchMenuEnabled;
+  $("#touch-menu-hint").textContent = thirdParty ? "从右下角三点打开菜单" : "点击角色腿部打开菜单";
+}
+
+window.setTouchMenuEnabled = (enabled, thirdParty = false) => {
+  if (thirdParty) thirdPartyMenuEnabled = enabled;
+  else touchMenuEnabled = enabled;
+  updateTouchMenuSetting();
+  if (!enabled && thirdParty === Boolean(view.session?.limited) && !petMenu.hidden) showPetMenu(false);
+  updateThirdPartyMenuButton();
+};
+$("#touch-menu").onchange = (event) => {
+  const enabled = event.target.checked;
+  const thirdParty = Boolean(view.session?.limited);
+  window.setTouchMenuEnabled(enabled, thirdParty);
+  native.setTouchMenuEnabled(enabled, thirdParty);
+};
+
 window.setWallpaperVisible = (visible) => {
   wallpaperVisible = visible;
   if (!visible) stopVoice();
+  if (visible) view.app?.resume();
+  else view.app?.pause();
   window.sceneLayers?.setVisible(visible);
+  scheduleWallpaperFrame();
 };
 window.wallpaperTap = (x, y) => {
   const clientX = x * innerWidth, clientY = y * innerHeight;
   const target = document.elementFromPoint(clientX, clientY);
   if (target?.closest("#pet-menu, #pet-menu-button")) target.closest("button")?.click();
   else if (target?.closest("#canvas")) avatarClick({clientX, clientY});
+};
+window.wallpaperGaze = (x, y) => {
+  const model = view.model;
+  const internal = model?.internalModel;
+  if (!internal) return;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return internal.focusController.focus(0, 0);
+  const rect = $("#canvas").getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const point = model.toModelPosition(new PIXI.Point(
+    (x * innerWidth - rect.left) * view.app.screen.width / rect.width,
+    (y * innerHeight - rect.top) * view.app.screen.height / rect.height));
+  internal.focusController.focus(point.x * 2 / internal.originalWidth - 1,
+    1 - point.y * 2 / internal.originalHeight);
 };
 window.addEventListener("scene-editor-change", () => {
   showPetMenu(false);
