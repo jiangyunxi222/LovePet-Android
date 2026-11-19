@@ -37,7 +37,8 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-enabled interactive Live2D pet overlay with a persistent stop control" />
         </service>
-        <service android:name=".PetWallpaperService" android:label="BandoriLovePet" android:icon="@drawable/pet_icon" android:process=":desktop"
+        <service android:name=".PetWallpaperService" android:label="@string/wallpaper_label"
+            android:icon="@drawable/pet_wallpaper_thumbnail" android:process=":desktop"
             android:permission="android.permission.BIND_WALLPAPER" android:exported="true">
             <intent-filter>
                 <action android:name="android.service.wallpaper.WallpaperService" />

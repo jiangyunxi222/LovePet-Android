@@ -632,7 +632,7 @@ public final class MainActivity extends Activity {
 
     private void offerWallpaperSettings() {
         if (player == null) return;
-        player.prompt("设置主屏幕壁纸", "请选择 BandoriLovePet。", "去设置", () -> {
+        player.prompt("设置主屏幕壁纸", "请选择「" + getString(R.string.wallpaper_label) + "」。", "去设置", () -> {
                     if (!launchWallpaperPicker(new Intent(Intent.ACTION_SET_WALLPAPER), WALLPAPER_SETTINGS)) {
                         wallpaperMessage("请长按桌面空白处更换壁纸。");
                     }
