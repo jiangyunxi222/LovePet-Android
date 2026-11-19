@@ -43,7 +43,7 @@ $debugLink = if (!$release) { @('--debug-mode') } else { @() }
 $env:JAVA_HOME = $Jdk
 $env:PATH = (Join-Path $Jdk 'bin') + [IO.Path]::PathSeparator + $env:PATH
 & (Join-Path $tools 'aapt2.exe') compile --dir (Join-Path $PSScriptRoot 'res') -o $compiled
-& (Join-Path $tools 'aapt2.exe') link -I $api --manifest (Join-Path $PSScriptRoot 'AndroidManifest.xml') @debugLink --version-code 5 --version-name $versionName --java $work -A $assets -0 js -o $unsigned $compiled
+& (Join-Path $tools 'aapt2.exe') link -I $api --manifest (Join-Path $PSScriptRoot 'AndroidManifest.xml') @debugLink --version-code 6 --version-name $versionName --java $work -A $assets -0 js -o $unsigned $compiled
 $javaSources = @(Get-ChildItem -LiteralPath $source -Recurse -Filter '*.java' | ForEach-Object FullName)
 $javaSources += Join-Path $work 'io/bandorilove/lovepet/R.java'
 & (Join-Path $Jdk 'bin/javac.exe') --release 11 -encoding UTF-8 -cp $api -d $classes @javaSources

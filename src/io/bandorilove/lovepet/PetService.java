@@ -55,9 +55,11 @@ public final class PetService extends Service {
     private Rect screen;
     private FrameLayout container;
     private final Rect crop = new Rect();
+    private final Rect laidOutCrop = new Rect();
     private final RectF cropArea = new RectF();
     private final RectF modelArea = new RectF();
     private Region touchRegion = new Region();
+    private boolean touchRegionDirty = true;
     private int canvasX, canvasY, canvasWidth, canvasHeight;
     private int displayWidth, displayHeight;
     private SharedPreferences saved;
@@ -156,7 +158,10 @@ public final class PetService extends Service {
         player.view().setPivotY(0);
         container.addView(player.view(), new FrameLayout.LayoutParams(canvasWidth, canvasHeight));
         container.setVisibility(View.INVISIBLE);
-        container.addOnLayoutChangeListener((v, l, t, r, b, previousL, previousT, previousR, previousB) -> pushTouchRegion());
+        container.getViewTreeObserver().addOnPreDrawListener(() -> {
+            positionViewport();
+            return true;
+        });
         player.onTouchShapeChanged(this::updateWindowCrop);
         window.addView(container, frame);
         overlay.registerComponentCallbacks(overlayConfiguration);
@@ -243,8 +248,8 @@ public final class PetService extends Service {
 
     private void updateWindowCrop() {
         if (container == null || !container.isAttachedToWindow()) return;
-        PetTouchShape shape = player.touchShape();
         if (((DragFrame) container).isMoving()) return;
+        PetTouchShape shape = player.touchShape();
         touchRegion = shape.modelRegion(canvasWidth, canvasHeight, dp(2));
         Rect model = touchRegion.getBounds();
         if (!model.isEmpty()) {
@@ -262,6 +267,11 @@ public final class PetService extends Service {
             }
         }
         shape.addControls(touchRegion, canvasWidth, canvasHeight);
+        touchRegionDirty = true;
+        updateWindowFrame();
+    }
+
+    private void updateWindowFrame() {
         if (cropArea.isEmpty()) crop.set(0, 0, 1, 1);
         else crop.set(Math.round(cropArea.left * canvasWidth), Math.round(cropArea.top * canvasHeight),
                 Math.round(cropArea.right * canvasWidth), Math.round(cropArea.bottom * canvasHeight));
@@ -271,11 +281,9 @@ public final class PetService extends Service {
             int y = Math.max(0, Math.min(displayHeight - 1, canvasY)) - canvasY;
             crop.set(x, y, x + 1, y + 1);
         }
-        touchRegion.op(crop, Region.Op.INTERSECT);
-        player.view().setTranslationX(-crop.left);
-        player.view().setTranslationY(-crop.top);
         layoutWindow(canvasX + crop.left, canvasY + crop.top, crop.width(), crop.height());
-        pushTouchRegion();
+        // A translation or scale change also needs a draw when the window bounds match.
+        container.invalidate();
     }
 
     private void layoutWindow(int x, int y, int width, int height) {
@@ -293,13 +301,15 @@ public final class PetService extends Service {
         AttachedSurfaceControl surface = container.getRootSurfaceControl();
         if (surface != null) {
             Region local;
-            if (((DragFrame) container).isMoving()) {
-                local = new Region(0, 0, displayWidth, displayHeight);
+            if (((DragFrame) container).pinching) {
+                local = new Region(0, 0, container.getWidth(), container.getHeight());
             } else {
                 local = new Region(touchRegion);
-                local.translate(-crop.left, -crop.top);
+                local.op(laidOutCrop, Region.Op.INTERSECT);
+                local.translate(-laidOutCrop.left, -laidOutCrop.top);
             }
             surface.setTouchableRegion(local);
+            touchRegionDirty = false;
         }
     }
 
@@ -349,36 +359,34 @@ public final class PetService extends Service {
         canvasWidth = width;
         canvasHeight = height;
         if (container != null) {
-            if (resized) syncViewport();
-            if (((DragFrame) container).isMoving()) positionGestureView();
+            if (resized && !((DragFrame) container).pinching) syncViewport();
+            if (((DragFrame) container).isMoving()) updateWindowFrame();
             else updateWindowCrop();
         }
     }
 
-    private void positionGestureView() {
-        player.view().setTranslationX(canvasX);
-        player.view().setTranslationY(canvasY);
-    }
-
-    private void enterGestureWindow() {
-        positionGestureView();
-        layoutWindow(0, 0, displayWidth, displayHeight);
-        pushTouchRegion();
+    private void positionViewport() {
+        View view = player.view();
+        if (view.getWidth() == 0 || view.getHeight() == 0) return;
+        boolean offsetChanged = !laidOutCrop.equals(crop);
+        laidOutCrop.set(crop);
+        // Apply the crop and scale at draw time, using the WebView size that was actually laid out.
+        // On pinch release the old WebView stays scaled until its new layout is ready.
+        view.setTranslationX(-crop.left);
+        view.setTranslationY(-crop.top);
+        view.setScaleX(canvasWidth / (float) view.getWidth());
+        view.setScaleY(canvasHeight / (float) view.getHeight());
+        if (offsetChanged) touchRegionDirty = true;
+        if (touchRegionDirty) pushTouchRegion();
     }
 
     private void syncViewport() {
         View view = player.view();
         android.view.ViewGroup.LayoutParams size = view.getLayoutParams();
-        if (((DragFrame) container).pinching) {
-            // Scale the existing WebView surface during the gesture, without relayout/WebGL resize.
-            view.setScaleX(canvasWidth / (float) Math.max(1, size.width));
-            view.setScaleY(canvasHeight / (float) Math.max(1, size.height));
-        } else {
+        if (size.width != canvasWidth || size.height != canvasHeight) {
             size.width = canvasWidth;
             size.height = canvasHeight;
             view.setLayoutParams(size);
-            view.setScaleX(1);
-            view.setScaleY(1);
         }
     }
 
@@ -525,8 +533,8 @@ public final class PetService extends Service {
                 return true;
             }
             if (action == MotionEvent.ACTION_DOWN) {
-                controlsGesture = player.touchShape().hitsControls((event.getX() + crop.left) / canvasWidth,
-                        (event.getY() + crop.top) / canvasHeight);
+                controlsGesture = player.touchShape().hitsControls((event.getX() + laidOutCrop.left) / canvasWidth,
+                        (event.getY() + laidOutCrop.top) / canvasHeight);
                 dragging = pinching = false;
                 startX = event.getRawX();
                 startY = event.getRawY();
@@ -542,17 +550,23 @@ public final class PetService extends Service {
                 pinching = true;
                 beginPinch(event);
                 player.pinching(true);
-                enterGestureWindow();
             }
-            if (pinching && (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_POINTER_UP)) {
+            if (pinching && action == MotionEvent.ACTION_MOVE) {
                 movePinch(event);
-            } else if (!pinching && (action == MotionEvent.ACTION_MOVE || (dragging && action == MotionEvent.ACTION_UP))) {
+            } else if (!pinching && action == MotionEvent.ACTION_MOVE) {
                 float dx = event.getRawX() - startX;
                 float dy = event.getRawY() - startY;
-                if (!dragging && Math.hypot(dx, dy) > slop) {
-                    cancelChild(event);
-                    dragging = true;
-                    enterGestureWindow();
+                if (!dragging) {
+                    float distance = (float) Math.hypot(dx, dy);
+                    if (distance > slop) {
+                        cancelChild(event);
+                        dragging = true;
+                        // Keep the avatar still within touch slop without jumping by that distance.
+                        startX += dx * slop / distance;
+                        startY += dy * slop / distance;
+                        dx = event.getRawX() - startX;
+                        dy = event.getRawY() - startY;
+                    }
                 }
                 if (dragging) queueFrame(windowX + Math.round(dx), windowY + Math.round(dy), canvasWidth);
             }
