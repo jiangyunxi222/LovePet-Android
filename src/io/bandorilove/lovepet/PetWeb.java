@@ -240,10 +240,10 @@ final class PetWeb {
                     onTouchShapeChanged.run();
                 });
             }
-            @JavascriptInterface public void modelTouchMask(String mask, boolean resetGrip) {
+            @JavascriptInterface public void modelTouchMask(String mask, boolean resetGrip, float rotation) {
                 if (!desktop || mask.length() != 40 * 58) return;
                 main.post(() -> {
-                    touchShape.setModel(mask, resetGrip);
+                    touchShape.setModel(mask, resetGrip, rotation);
                     onTouchShapeChanged.run();
                 });
             }

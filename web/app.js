@@ -402,13 +402,21 @@ function makeRenderer() {
   let enlarged = isEnlarged(stage.clientWidth);
   const readAlpha = makeAlphaSampler(canvas);
   const sampleTouchMask = pet ? makeTouchSampler(readAlpha) : null;
+  let refreshTouchMask = false;
+  let desktopRotationPending = false;
   const ticker = PIXI.Ticker.shared;
   ticker.add(() => {
     if ((wallpaper && !wallpaperVisible) || (!wallpaper && document.hidden)) return;
-    // Composite the preserved frame during a gesture, leaving the GPU free to present transforms.
-    if (pet && desktopMoving) return;
+    // Dragging and pinching composite the previous frame; a rotation redraws only when its angle changes.
+    if (desktopRotationPending) {
+      desktopRotationPending = false;
+      placeModel();
+    } else if (pet && desktopMoving) return;
     renderer.render(contents);
-    if (sampleTouchMask && overlayVisible && view.model && !desktopMoving) sampleTouchMask(view.model);
+    if (sampleTouchMask && overlayVisible && view.model && !desktopMoving) {
+      sampleTouchMask(view.model, refreshTouchMask);
+      refreshTouchMask = false;
+    }
   }, undefined, PIXI.UPDATE_PRIORITY.LOW);
   function syncMask(model) {
     if (!model?.internalModel.coreModel.isUsingMasking?.()) return false;
@@ -461,13 +469,14 @@ function makeRenderer() {
     if (pet) {
       clearTimeout(resizeTimer);
       // CSS scales the existing transparent frame while Android tracks two fingers.
-      if (!pinching) resizeTimer = setTimeout(syncCanvas, 80);
+      if (!desktopMoving) resizeTimer = setTimeout(syncCanvas, 80);
     } else syncCanvas();
   }
   if (pet) window.setDesktopGesture = (moving, zooming) => {
     desktopMoving = moving;
     pinching = zooming;
     if (!moving) {
+      refreshTouchMask = true;
       desktopRasterScale = desktopModelScale;
       captionDrag.layout();
       updateThirdPartyMenuButton();
@@ -485,7 +494,8 @@ function makeRenderer() {
   const pause = () => { ticker.autoStart = false; ticker.stop(); };
   if (wallpaper && !wallpaperVisible) pause();
   return { renderer, stage: contents, screen: renderer.screen, readAlpha, syncCanvas,
-    prepareModel, scheduleQualitySync, setScenePinching, pause, resume: () => ticker.start() };
+    prepareModel, scheduleQualitySync, setScenePinching, pause, resume: () => ticker.start(),
+    requestDesktopRotation: () => { desktopRotationPending = true; } };
 }
 
 const touchColumns = 40, touchRows = 58;
@@ -503,19 +513,20 @@ function makeAlphaSampler(canvas) {
 
 function makeTouchSampler(readAlpha) {
   let lastSample = 0, lastMask = "", lastModel;
-  return (model) => {
+  return (model, refresh) => {
     const now = performance.now();
-    if (now - lastSample < 145) return;
+    if (!refresh && now - lastSample < 145) return;
     lastSample = now;
     const data = readAlpha();
     let mask = "";
     for (let i = 3; i < data.length; i += 4) mask += data[i] >= 28 ? "1" : "0";
-    const hasBody = mask.includes("1");
-    const changedModel = hasBody && model !== lastModel;
-    if (mask !== lastMask || changedModel) {
-      native.modelTouchMask(mask, changedModel);
+    // A blank frame during a surface update should not erase the last usable touch outline.
+    if (!mask.includes("1")) return;
+    const changedModel = model !== lastModel;
+    if (refresh || mask !== lastMask || changedModel) {
+      native.modelTouchMask(mask, changedModel, desktopRotation);
       lastMask = mask;
-      if (hasBody) lastModel = model;
+      lastModel = model;
     }
   };
 }
@@ -590,7 +601,7 @@ function placeModel() {
     view.model.position.set(centerX + width * x + (dx * cos - dy * sin) * adjustedZoom,
       centerY + height * y + (dx * sin + dy * cos) * adjustedZoom);
   }
-  if (view.session.limited) updateThirdPartyMenuButton();
+  if (view.session.limited && !desktopMoving) updateThirdPartyMenuButton();
 }
 
 function setSceneCharacterTransform({ scale, x, y, rotation = 0 }) {
@@ -604,7 +615,7 @@ function setSceneCharacterTransform({ scale, x, y, rotation = 0 }) {
 window.setDesktopRotation = (rotation) => {
   if (desktopRotation === rotation) return;
   desktopRotation = rotation;
-  placeModel();
+  view.app?.requestDesktopRotation();
 };
 
 function motionFades(model, metadata) {
@@ -1167,8 +1178,9 @@ function positionPetMenu() {
   petMenu.style.maxWidth = Math.max(0, area.width - 8) + "px";
   petMenu.style.maxHeight = Math.max(0, area.height - 8) + "px";
   const right = area.x + area.width - petMenu.offsetWidth - 4;
-  const bottom = area.y + area.height - petMenu.offsetHeight - 4;
-  petMenu.style.top = Math.max(area.y + 4, bottom) + "px";
+  const freeHeight = area.height - petMenu.offsetHeight;
+  const top = area.y + (wallpaper ? freeHeight / 2 : freeHeight - 4);
+  petMenu.style.top = Math.max(area.y + 4, top) + "px";
   petMenu.style.left = Math.max(area.x + 4, right) + "px";
   if (pet) reportPetBounds("menu", petMenu.getBoundingClientRect());
 }

@@ -9,12 +9,16 @@ final class PetTouchShape {
     private static final int COLUMNS = 40;
     private static final int ROWS = 58;
     private String mask = "";
+    private float modelRotation;
+    private int modelRevision;
     private RectF caption, menu, menuButton;
     private PointF grip;
 
-    void setModel(String shape, boolean resetGrip) {
+    void setModel(String shape, boolean resetGrip, float rotation) {
         if (shape.length() != COLUMNS * ROWS) return;
         mask = shape;
+        modelRotation = rotation;
+        if (resetGrip) modelRevision++;
         if (!resetGrip && grip != null) return;
         float nearest = Float.POSITIVE_INFINITY;
         for (int row = 0; row < ROWS; row++) {
@@ -31,6 +35,8 @@ final class PetTouchShape {
     }
 
     PointF grip() { return grip; }
+    float modelRotation() { return modelRotation; }
+    int modelRevision() { return modelRevision; }
 
     void setControl(String name, RectF bounds) {
         switch (name) {
@@ -46,8 +52,9 @@ final class PetTouchShape {
                 || (menuButton != null && menuButton.contains(x, y));
     }
 
-    Region modelRegion(int width, int height, int padding) {
+    Region modelRegion(int width, int height, int padding, Rect modelBounds) {
         Region result = new Region();
+        modelBounds.setEmpty();
         if (!mask.isEmpty()) {
             for (int row = 0; row < ROWS; row++) {
                 int top = row * height / ROWS;
@@ -57,8 +64,10 @@ final class PetTouchShape {
                     if (mask.charAt(offset + col) != '1') continue;
                     int start = col;
                     while (col + 1 < COLUMNS && mask.charAt(offset + col + 1) == '1') col++;
-                    result.union(new Rect(start * width / COLUMNS - padding, top - padding,
-                            (col + 1) * width / COLUMNS + padding, bottom + padding));
+                    int left = start * width / COLUMNS;
+                    int right = (col + 1) * width / COLUMNS;
+                    modelBounds.union(left, top, right, bottom);
+                    result.union(new Rect(left - padding, top - padding, right + padding, bottom + padding));
                 }
             }
         }

@@ -552,6 +552,10 @@
     }
     fingers.delete(event.pointerId);
     if (fingers.size) {
+      if (fingers.size === 2 && threeFinger?.rotating && !threeFinger.canceled) {
+        // Keep the current rotation and rebase the pinch to the two remaining fingers.
+        threeFinger = previousThreeTap = null;
+      }
       if (!threeFinger) beginGesture();
       return;
     }
