@@ -1,8 +1,6 @@
 <resources>
     <color name="startup_background">#FAF6F9</color>
     <color name="startup_wordmark">#47364A</color>
-    <string name="loading_app">正在加载…</string>
-    <string name="loading_model">正在加载模型…</string>
     <style name="PetActivityTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/startup_background</item>
         <item name="android:windowSplashScreenBackground">@color/startup_background</item>

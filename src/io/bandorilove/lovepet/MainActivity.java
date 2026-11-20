@@ -12,7 +12,6 @@ import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.Insets;
 import android.graphics.Rect;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -26,6 +25,7 @@ import android.util.Log;
 import android.util.Base64;
 import android.view.Gravity;
 import android.view.PixelCopy;
+import android.view.View;
 import android.view.WindowInsets;
 import android.view.animation.DecelerateInterpolator;
 import android.webkit.WebView;
@@ -68,7 +68,7 @@ public final class MainActivity extends Activity {
     private ModelStore store;
     private FrameLayout frame;
     private Insets panelInsets = Insets.NONE;
-    private FrameLayout startupCover;
+    private View startupCover;
     private final Runnable startupTimeout = () -> showPlayerError("应用加载超时，请重试。");
     private boolean importing;
     private boolean resumed;
@@ -137,29 +137,16 @@ public final class MainActivity extends Activity {
 
     private void attachPlayer() {
         frame.removeAllViews();
-        FrameLayout cover = new FrameLayout(this);
+        View cover = getLayoutInflater().inflate(R.layout.wallpaper_recovery_cover, frame, false);
         cover.setClickable(true);
-        cover.setBackgroundResource(R.color.startup_background);
-        float density = getResources().getDisplayMetrics().density;
-        TextView loading = new TextView(this);
-        loading.setText(store.active() == null ? R.string.loading_app : R.string.loading_model);
-        loading.setTextColor(0xFFFFFFFF);
-        loading.setTextSize(13);
-        GradientDrawable pill = new GradientDrawable();
-        pill.setColor(0xD13A2335);
-        pill.setCornerRadius(12 * density);
-        loading.setBackground(pill);
-        int x = Math.round(12 * density), y = Math.round(6 * density);
-        loading.setPadding(x, y, x, y);
-        cover.addView(loading, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
-        frame.addView(cover, new FrameLayout.LayoutParams(-1, -1));
+        frame.addView(cover);
         startupCover = cover;
         Runnable open = () -> startPanel(cover);
         frame.getViewTreeObserver().registerFrameCommitCallback(() -> frame.post(open));
         frame.postDelayed(open, 150);
     }
 
-    private void startPanel(FrameLayout cover) {
+    private void startPanel(View cover) {
         if (startupCover != cover || player != null || isFinishing() || isDestroyed()) return;
         try {
             if (WebView.getCurrentWebViewPackage() == null) {
@@ -189,7 +176,7 @@ public final class MainActivity extends Activity {
     void panelFrameReady(int generation, boolean ready) {
         if (generation != panelLoadGeneration) return;
         panelModelReady = ready;
-        FrameLayout cover = startupCover;
+        View cover = startupCover;
         if (cover == null) {
             if (player != null) player.panelFramePresented(generation, ready);
             showWallpaperSuccess();
