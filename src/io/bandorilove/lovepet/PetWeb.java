@@ -27,6 +27,7 @@ final class PetWeb {
     private final ModelStore store;
     private final WebView view;
     private final boolean desktop;
+    private volatile float desktopScale = 1;
     private final WallpaperMedia.Writer mediaWriter;
     private final WallpaperTilt tilt;
     private volatile boolean wallpaperMode;
@@ -221,6 +222,7 @@ final class PetWeb {
             @JavascriptInterface public void command(String text) { main.post(() -> send(text)); }
             @JavascriptInterface public boolean petShowing() { return DesktopRuntime.petShowing(); }
             @JavascriptInterface public boolean petVisible() { return DesktopRuntime.petVisible(); }
+            @JavascriptInterface public float desktopScale() { return desktopScale; }
             @JavascriptInterface public boolean homeOnly() { return PetService.homeOnly(context); }
             @JavascriptInterface public void immersivePreview(boolean on) {
                 if (!desktop) main.post(() -> immersive.accept(on));
@@ -364,13 +366,20 @@ final class PetWeb {
                 + PetService.homeOnly(context) + ")");
     }
     void progress(boolean busy) { evaluate("window.importProgress?.(" + busy + ")"); }
-    void pinching(boolean active) { evaluate("window.setPetPinching?.(" + active + ")"); }
+    void desktopScale(float scale) {
+        if (scale == desktopScale) return;
+        desktopScale = scale;
+        if (pageReady) evaluate("window.setDesktopScale?.(" + scale + ")");
+    }
+    void desktopGesture(boolean moving, boolean pinching) {
+        evaluate("window.setDesktopGesture?.(" + moving + "," + pinching + ")");
+    }
     void error(String text) { evaluate("window.reportError?.(" + JSONObject.quote(text) + ")"); }
     void receive(JSONObject command, boolean sound) {
         evaluate("window.receiveCommand?.(" + command + "," + sound + ")");
     }
     private void evaluate(String script) { view.evaluateJavascript(script, null); }
-    private void afterVisualState(Runnable complete) {
+    void afterVisualState(Runnable complete) {
         if (!view.isAttachedToWindow()) return;
         view.postVisualStateCallback(0, new WebView.VisualStateCallback() {
             @Override public void onComplete(long requestId) {

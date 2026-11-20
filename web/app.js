@@ -23,6 +23,8 @@ let wallpaperSuccessShown = null;
 let panelLoadSequence = 0;
 let panelRenderReady = false;
 let desktopCrop;
+let desktopModelScale = 1, desktopRasterScale = 1;
+let desktopMoving = false;
 const captionDrag = enableCaptionDrag(caption, desktopControlArea, (rect) => {
   if (pet) reportPetBounds("caption", rect);
 });
@@ -52,6 +54,7 @@ window.setPanelInsets = (...insets) => {
   }
 };
 document.documentElement.classList.toggle("wallpaper", wallpaper);
+if (pet) setDesktopScale(native.desktopScale());
 
 const asset = (path, base = "/media/" + view.session.version + "/") =>
   new URL(path.split("/").map(encodeURIComponent).join("/"), location.origin + base).href;
@@ -360,10 +363,10 @@ function makeRenderer() {
   const [maxWidth, maxHeight] = Array.from(context.getParameter(context.MAX_VIEWPORT_DIMS), value => Math.min(value, maxSide));
   const anisotropy = context.getExtension("EXT_texture_filter_anisotropic");
   const anisotropyLevel = anisotropy ? Math.min(4, context.getParameter(anisotropy.MAX_TEXTURE_MAX_ANISOTROPY_EXT)) : 0;
-  const isEnlarged = (width) => pet ? width * (devicePixelRatio || 1) >= 640
+  const isEnlarged = (width) => pet ? width * (devicePixelRatio || 1) * desktopRasterScale >= 640
     : (view.sceneCharacterTransform?.scale ?? 1) >= 1.25;
   function resolutionFor(width, height, enlarged) {
-    const nativeResolution = devicePixelRatio || 1;
+    const nativeResolution = (devicePixelRatio || 1) * desktopRasterScale;
     // Bound the extra framebuffer area on high-resolution screens.
     const target = enlarged ? Math.min(nativeResolution * 1.25,
       Math.sqrt(nativeResolution ** 2 + 1_200_000 / (width * height))) : nativeResolution;
@@ -387,10 +390,10 @@ function makeRenderer() {
   const ticker = PIXI.Ticker.shared;
   ticker.add(() => {
     if ((wallpaper && !wallpaperVisible) || (!wallpaper && document.hidden)) return;
-    // While fingers resize the desktop viewport, composite the preserved frame without a GPU redraw.
-    if (pet && pinching) return;
+    // Composite the preserved frame during a gesture, leaving the GPU free to present transforms.
+    if (pet && desktopMoving) return;
     renderer.render(contents);
-    if (sampleTouchMask && overlayVisible && view.model && !pinching) sampleTouchMask(view.model);
+    if (sampleTouchMask && overlayVisible && view.model && !desktopMoving) sampleTouchMask(view.model);
   }, undefined, PIXI.UPDATE_PRIORITY.LOW);
   function syncMask(model) {
     if (!model?.internalModel.coreModel.isUsingMasking?.()) return false;
@@ -446,8 +449,14 @@ function makeRenderer() {
       if (!pinching) resizeTimer = setTimeout(syncCanvas, 80);
     } else syncCanvas();
   }
-  if (pet) window.setPetPinching = (active) => {
-    pinching = active;
+  if (pet) window.setDesktopGesture = (moving, zooming) => {
+    desktopMoving = moving;
+    pinching = zooming;
+    if (!moving) {
+      desktopRasterScale = desktopModelScale;
+      captionDrag.layout();
+      updateThirdPartyMenuButton();
+    }
     scheduleCanvasSync();
   };
   const resize = new ResizeObserver(() => {
@@ -980,11 +989,23 @@ function reportPetBounds(name, rect) {
 }
 
 function desktopControlArea() {
-  const width = captionStage.clientWidth, height = captionStage.clientHeight;
+  const width = pet ? $("#canvas").clientWidth * desktopModelScale : captionStage.clientWidth;
+  const height = pet ? $("#canvas").clientHeight * desktopModelScale : captionStage.clientHeight;
   if (!pet || !desktopCrop) return { x: 0, y: 0, width, height };
   const [left, top, right, bottom] = desktopCrop;
   return { x: left * width, y: top * height, width: (right - left) * width, height: (bottom - top) * height };
 }
+
+function setDesktopScale(scale) {
+  desktopModelScale = scale;
+  $("#canvas").style.transform = `scale(${desktopModelScale})`;
+  if (!desktopMoving) {
+    desktopRasterScale = desktopModelScale;
+    captionDrag.layout();
+    updateThirdPartyMenuButton();
+  }
+}
+window.setDesktopScale = setDesktopScale;
 
 window.setDesktopCrop = (...bounds) => {
   desktopCrop = bounds;
@@ -1207,6 +1228,12 @@ appPrompt.addEventListener("close", () => {
 });
 window.showAppNotice = (message) => {
   const notice = $("#app-notice");
+  if (pet) {
+    const canvas = $("#canvas");
+    notice.style.left = canvas.clientWidth * desktopModelScale / 2 + "px";
+    notice.style.top = canvas.clientHeight * desktopModelScale - 70 + "px";
+    notice.style.maxWidth = Math.max(0, canvas.clientWidth * desktopModelScale - 28) + "px";
+  }
   notice.textContent = message;
   notice.hidden = false;
   clearTimeout(noticeTimer);
