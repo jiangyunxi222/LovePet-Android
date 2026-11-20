@@ -38,6 +38,10 @@ public final class PetService extends Service {
     private DisplayManager displays;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable refreshDisplay = this::refreshDisplayBounds;
+    private final Runnable settleRotationCrop = () -> {
+        rotationCrop = false;
+        updateWindowCrop();
+    };
     private final DisplayManager.DisplayListener displayListener = new DisplayManager.DisplayListener() {
         @Override public void onDisplayAdded(int id) {}
         @Override public void onDisplayRemoved(int id) {}
@@ -56,6 +60,8 @@ public final class PetService extends Service {
     private Region touchRegion = new Region();
     private int canvasX, canvasY, canvasWidth, canvasHeight;
     private int displayWidth, displayHeight;
+    private float desktopRotation;
+    private boolean rotationCrop;
     private SharedPreferences saved;
     private HomeVisibility homeVisibility;
     private boolean wantedVisible;
@@ -144,6 +150,7 @@ public final class PetService extends Service {
         width = limitWidth(width);
         player = new PetWeb(overlay, true, () -> {}, this::stopSelf, () -> startActivity(panelIntent()),
                 ignored -> {}, ignored -> {}, ignored -> {}, this::stopSelf);
+        setDesktopRotation(saved.getFloat("rotation", 0));
         place(saved.getInt("x", screen.right - width),
                 saved.getInt("y", screen.bottom - heightForWidth(width) - dp(60)), width);
         container = new DragFrame(overlay);
@@ -226,7 +233,8 @@ public final class PetService extends Service {
     }
 
     private void updateWindowFrame() {
-        if (cropArea.isEmpty()) crop.set(canvasX, canvasY, canvasX + 1, canvasY + 1);
+        if (rotationCrop) crop.set(canvasX, canvasY, canvasX + canvasWidth, canvasY + canvasHeight);
+        else if (cropArea.isEmpty()) crop.set(canvasX, canvasY, canvasX + 1, canvasY + 1);
         else crop.set(canvasX + Math.round(cropArea.left * canvasWidth),
                 canvasY + Math.round(cropArea.top * canvasHeight),
                 canvasX + Math.round(cropArea.right * canvasWidth),
@@ -363,7 +371,26 @@ public final class PetService extends Service {
 
     private void savePlacement() {
         saved.edit().putInt("x", canvasX).putInt("y", canvasY).putInt("width", canvasWidth)
-                .putBoolean("fixedAspect", true).apply();
+                .putFloat("rotation", desktopRotation).putBoolean("fixedAspect", true).apply();
+    }
+
+    private void setDesktopRotation(float angle) {
+        desktopRotation = (float) Math.IEEEremainder(angle, 360);
+        player.desktopRotation(desktopRotation);
+    }
+
+    private void holdRotationCrop() {
+        main.removeCallbacks(settleRotationCrop);
+        if (rotationCrop) return;
+        rotationCrop = true;
+        updateWindowFrame();
+    }
+
+    private void resetPlacement() {
+        holdRotationCrop();
+        int width = limitWidth(dp(190));
+        place(screen.right - width, screen.bottom - heightForWidth(width) - dp(60), width);
+        setDesktopRotation(0);
     }
 
     @Override public void onConfigurationChanged(Configuration configuration) {
@@ -374,6 +401,7 @@ public final class PetService extends Service {
     @Override public void onDestroy() {
         if (active == this) active = null;
         main.removeCallbacks(refreshDisplay);
+        main.removeCallbacks(settleRotationCrop);
         if (displays != null) displays.unregisterDisplayListener(displayListener);
         if (homeVisibility != null) homeVisibility.close();
         if (container != null && container.isAttachedToWindow()) window.removeViewImmediate(container);
@@ -429,13 +457,17 @@ public final class PetService extends Service {
         private int initialWidth;
         private float anchorX;
         private float anchorY;
+        private ThreeFingerGesture threeFinger;
+        private long lastThreeTapAt;
+        private float lastThreeTapX;
+        private float lastThreeTapY;
 
         DragFrame(Context context) {
             super(context);
             slop = ViewConfiguration.get(context).getScaledTouchSlop();
         }
 
-        private boolean moving() { return dragging || pinching; }
+        private boolean moving() { return dragging || pinching || threeFinger != null; }
 
         private void beginPinch(MotionEvent event) {
             firstFinger = event.getPointerId(0);
@@ -465,6 +497,10 @@ public final class PetService extends Service {
         private void cancelGesture() {
             if (moving()) player.desktopGesture(false, false);
             dragging = pinching = controlsGesture = false;
+            threeFinger = null;
+            lastThreeTapAt = 0;
+            main.removeCallbacks(settleRotationCrop);
+            rotationCrop = false;
             ignoreUntilDown = true;
         }
 
@@ -481,9 +517,21 @@ public final class PetService extends Service {
                 windowY = canvasY;
             }
             if (controlsGesture) {
+                lastThreeTapAt = 0;
                 if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) controlsGesture = false;
                 return super.dispatchTouchEvent(event);
             }
+            if (threeFinger != null) {
+                handleThreeFinger(event);
+                return true;
+            }
+            if (action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() == 3) {
+                threeFinger = new ThreeFingerGesture(event);
+                dragging = pinching = false;
+                player.desktopGesture(false, false);
+                return true;
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) lastThreeTapAt = 0;
             if (action == MotionEvent.ACTION_POINTER_DOWN && !pinching) {
                 if (!dragging) cancelChild(event);
                 pinching = true;
@@ -510,6 +558,104 @@ public final class PetService extends Service {
                 savePlacement();
             }
             return true;
+        }
+
+        private void handleThreeFinger(MotionEvent event) {
+            int action = event.getActionMasked();
+            ThreeFingerGesture chord = threeFinger;
+            if (action == MotionEvent.ACTION_POINTER_DOWN) chord.canceled = true;
+            if (!chord.canceled && action != MotionEvent.ACTION_CANCEL) chord.checkMovement(event);
+            if (action == MotionEvent.ACTION_MOVE && !chord.released && !chord.canceled) chord.rotate(event);
+            if (action == MotionEvent.ACTION_POINTER_UP) chord.released = true;
+            if (action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL) return;
+            long now = event.getEventTime();
+            if (action == MotionEvent.ACTION_UP && chord.isTap(now)) {
+                if (lastThreeTapAt != 0 && chord.downTime - lastThreeTapAt <= 360
+                        && Math.hypot(chord.centerX - lastThreeTapX, chord.centerY - lastThreeTapY) <= dp(44)) {
+                    resetPlacement();
+                    lastThreeTapAt = 0;
+                } else {
+                    lastThreeTapAt = now;
+                    lastThreeTapX = chord.centerX;
+                    lastThreeTapY = chord.centerY;
+                }
+            } else lastThreeTapAt = 0;
+            threeFinger = null;
+            if (rotationCrop) {
+                // Leave room for the final pose until the WebView has sampled its new touch mask.
+                main.removeCallbacks(settleRotationCrop);
+                main.postDelayed(settleRotationCrop, 180);
+            } else player.afterVisualState(PetService.this::updateWindowCrop);
+            savePlacement();
+        }
+
+        private final class ThreeFingerGesture {
+            private final int[] ids = new int[3];
+            private final float[] startXs = new float[3], startYs = new float[3];
+            private final float[] xs = new float[3], ys = new float[3];
+            private final float centerX;
+            private final float centerY;
+            private final float startRotation = desktopRotation;
+            private final long downTime;
+            private boolean moved;
+            private boolean rotating;
+            private boolean released;
+            private boolean canceled;
+
+            ThreeFingerGesture(MotionEvent event) {
+                downTime = event.getDownTime();
+                for (int i = 0; i < ids.length; i++) {
+                    ids[i] = event.getPointerId(i);
+                    startXs[i] = event.getRawX(i);
+                    startYs[i] = event.getRawY(i);
+                }
+                centerX = (startXs[0] + startXs[1] + startXs[2]) / 3;
+                centerY = (startYs[0] + startYs[1] + startYs[2]) / 3;
+                int tapSlop = dp(12);
+                moved = event.getEventTime() - downTime > 200 || dragging
+                        || Math.hypot(startXs[0] - startX, startYs[0] - startY) > tapSlop
+                        || (pinching && (Math.abs(canvasWidth - initialWidth) > tapSlop
+                        || Math.hypot(canvasX - windowX, canvasY - windowY) > tapSlop));
+            }
+
+            void checkMovement(MotionEvent event) {
+                if (moved) return;
+                for (int i = 0; i < ids.length; i++) {
+                    int index = event.findPointerIndex(ids[i]);
+                    if (index >= 0 && Math.hypot(event.getRawX(index) - startXs[i],
+                            event.getRawY(index) - startYs[i]) > dp(12)) {
+                        moved = true;
+                        return;
+                    }
+                }
+            }
+
+            void rotate(MotionEvent event) {
+                for (int i = 0; i < ids.length; i++) {
+                    int index = event.findPointerIndex(ids[i]);
+                    if (index < 0) return;
+                    xs[i] = event.getRawX(index);
+                    ys[i] = event.getRawY(index);
+                }
+                float x = (xs[0] + xs[1] + xs[2]) / 3, y = (ys[0] + ys[1] + ys[2]) / 3;
+                float cross = 0, dot = 0;
+                for (int i = 0; i < ids.length; i++) {
+                    float dx = startXs[i] - centerX, dy = startYs[i] - centerY;
+                    float nextX = xs[i] - x, nextY = ys[i] - y;
+                    cross += dx * nextY - dy * nextX;
+                    dot += dx * nextX + dy * nextY;
+                }
+                if (Math.hypot(cross, dot) < 16) return;
+                float delta = (float) Math.toDegrees(Math.atan2(cross, dot));
+                if (!rotating && Math.abs(delta) < 4) return;
+                if (!rotating) holdRotationCrop();
+                rotating = true;
+                setDesktopRotation(startRotation + delta);
+            }
+
+            boolean isTap(long time) {
+                return !canceled && !moved && !rotating && time - downTime <= 290;
+            }
         }
 
         private void cancelChild(MotionEvent event) {

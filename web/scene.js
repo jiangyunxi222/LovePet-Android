@@ -3,13 +3,19 @@
 (() => {
   if (pet) return;
   const key = "wallpaper-scene-v1";
-  const base = () => ({ id: "background", kind: "background", name: "默认背景", color: "default", opacity: 1, visible: true, scale: 1, x: 0, y: 0 });
+  const materialPlacement = { scale: 1, x: 0, y: 0, rotation: 0 };
+  const characterPlacement = { ...materialPlacement, scale: .82, y: -.04 };
+  const base = () => ({ id: "background", kind: "background", name: "默认背景", color: "default", opacity: 1, visible: true, ...materialPlacement });
   const isBase = layer => layer.id === "background";
   const defaults = () => [
     base(),
-    { id: "character", kind: "character", name: "Live2D 角色", opacity: 1, visible: true, scale: .82, x: 0, y: -.04 },
-    { id: "sparkles", kind: "effect", name: "星光", effect: "stars", opacity: .65, visible: true, scale: 1, x: 0, y: 0 },
+    { id: "character", kind: "character", name: "Live2D 角色", opacity: 1, visible: true, ...characterPlacement },
+    { id: "sparkles", kind: "effect", name: "星光", effect: "stars", opacity: .65, visible: true, ...materialPlacement },
   ];
+  function wrapRotation(value) {
+    const angle = value % 360;
+    return angle > 180 ? angle - 360 : angle < -180 ? angle + 360 : angle || 0;
+  }
   const palettes = {
     default: ["原色", "radial-gradient(ellipse at 50% 82%,#eee0eb,#fbf5f9 75%)"],
     dusk: ["暮色", "radial-gradient(ellipse at 16% 13%,#d3abce 0%,transparent 58%),linear-gradient(160deg,#4b456d,#916786 58%,#f1c5be)"],
@@ -37,7 +43,9 @@
     });
     // Reserve room for the character if a scene from an older build omitted the base.
     if (content.length > 11) content.splice(content.findIndex(layer => layer.kind !== "character"), 1);
-    return [base(), ...content];
+    return [base(), ...content.map(layer => ({
+      ...layer, rotation: Number.isFinite(layer.rotation) ? wrapRotation(layer.rotation) : 0,
+    }))];
   }
   let layers;
   try {
@@ -161,7 +169,7 @@
       return;
     }
     node.classList.toggle("scene-tilt", layer.kind !== "effect");
-    node.style.transform = "translate(" + layer.x * 100 + "%," + layer.y * 100 + "%) scale(" + layer.scale + ")";
+    node.style.transform = "translate(" + layer.x * 100 + "%," + layer.y * 100 + "%) rotate(" + layer.rotation + "deg) scale(" + layer.scale + ")";
   }
   function particleOptions(type) {
     const particles = {
@@ -310,7 +318,9 @@
     }
     $("#scene-opacity-value").textContent = Math.round(layer.opacity * 100) + "%";
     $("#scene-scale-value").textContent = Math.round(layer.scale * 100) + "%";
-    $("#scene-scale-row").hidden = $(".scene-position").hidden = layer.kind === "background";
+    $("#scene-rotation").value = Math.round(layer.rotation);
+    $("#scene-rotation-value").textContent = Math.round(layer.rotation) + "°";
+    $("#scene-rotation-row").hidden = $("#scene-scale-row").hidden = $(".scene-position").hidden = layer.kind === "background";
     $("#scene-opacity-row").hidden = isBase(layer);
     $("#scene-base-note").hidden = !isBase(layer);
   }
@@ -389,10 +399,10 @@
     updateTiltPreview();
   };
   $("#scene-wallpaper-settings").onclick = () => native.openPermission("wallpaper");
-  for (const name of ["opacity", "scale", "x", "y"]) {
+  for (const name of ["opacity", "scale", "x", "y", "rotation"]) {
     $("#scene-" + name).oninput = (event) => {
       if (isBase(current())) return;
-      current()[name] = Number(event.target.value) / 100;
+      current()[name] = Number(event.target.value) / (name === "rotation" ? 1 : 100);
       render(); editSelected();
     };
     $("#scene-" + name).onchange = save;
@@ -400,7 +410,7 @@
   function addEffect(effect, name) {
     if (layers.length >= 12) return message("最多可放置 12 个图层。");
     if (layers.filter(layer => layer.kind === "effect").length >= 3) return message("最多同时使用 3 层特效，减少发热与耗电。");
-    const layer = { id: identifier(), kind: "effect", effect, name, opacity: .8, visible: true, scale: 1, x: 0, y: 0 };
+    const layer = { id: identifier(), kind: "effect", effect, name, opacity: .8, visible: true, ...materialPlacement };
     layers.push(layer);
     selected = layer.id; $("#scene-choices").hidden = true; update(); message();
   }
@@ -422,43 +432,100 @@
   };
   // Keep the framebuffer size steady during gestures.
   const stage = $("#stage"), fingers = new Map();
-  let gesture, moving = false, suppressClick = false;
+  let gesture, threeFinger, previousThreeTap, firstPressedAt;
+  let moving = false, changed = false, tapMoved = false, suppressClick = false;
+  function centerOf(points) {
+    const center = { x: 0, y: 0 };
+    for (const point of points) {
+      center.x += point.x / points.length;
+      center.y += point.y / points.length;
+    }
+    return center;
+  }
   function beginGesture() {
     const points = [...fingers.values()];
-    const layer = gesture?.layer || (isBase(current()) ? layers.find(item => item.kind === "character") : current());
     if (!points.length) { gesture = null; return; }
+    const inEditor = document.documentElement.classList.contains("scene-edit");
+    const layer = gesture?.layer || (inEditor && !isBase(current()) ? current() : layers.find(item => item.kind === "character"));
     gesture = { layer, x: layer.x, y: layer.y, scale: layer.scale, bounds: stage.getBoundingClientRect(),
-      center: points.length === 2 ? { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 } : points[0],
+      center: centerOf(points),
       distance: points.length === 2 ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) : 0 };
+  }
+  function paintGestureLayer(layer) {
+    changed = true;
+    const node = layer.kind === "character" ? $("#canvas") : nodes.get(layer.id);
+    if (node) applyNode(layer, node, layers.indexOf(layer));
+    if (layer === current() && !$("#scene-editor").hidden) editSelected();
   }
   function captureGesture() {
     moving = suppressClick = true;
     cancelPreviewTouch();
     for (const id of fingers.keys()) stage.setPointerCapture(id);
   }
+  function rotateGesture() {
+    const chord = threeFinger;
+    if (!chord.frame) return;
+    cancelAnimationFrame(chord.frame);
+    chord.frame = 0;
+    if (chord.released || chord.canceled || !layers.includes(chord.layer)) return;
+    const points = [...fingers.values()];
+    const center = centerOf(points);
+    let cross = 0, dot = 0;
+    for (const [index, point] of points.entries()) {
+      const x = chord.points[index].x - chord.center.x, y = chord.points[index].y - chord.center.y;
+      const nextX = point.x - center.x, nextY = point.y - center.y;
+      cross += x * nextY - y * nextX;
+      dot += x * nextX + y * nextY;
+    }
+    if (Math.hypot(dot, cross) < 16) return;
+    const delta = Math.atan2(cross, dot) * 180 / Math.PI;
+    if (!chord.rotating && Math.abs(delta) < 4) return;
+    chord.rotating = true;
+    chord.layer.rotation = wrapRotation(chord.rotation + delta);
+    paintGestureLayer(chord.layer);
+  }
   stage.addEventListener("pointerdown", event => {
-    if (!fingers.size) suppressClick = false;
     const root = document.documentElement;
     const editing = root.classList.contains("scene-edit") && !root.classList.contains("scene-preview");
     if (wallpaper || !root.classList.contains("immersive-preview") || !view.model || !$("#loading").hidden
-        || (editing && isBase(current())) || event.target.closest("#caption, #pet-menu, button")) return;
+        || (!fingers.size && ((editing && isBase(current())) || event.target.closest("#caption, #pet-menu, button")))) return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
-    if (fingers.size >= 2) return;
-    fingers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    beginGesture();
-    if (fingers.size === 2) {
+    if (!fingers.size) {
+      changed = tapMoved = suppressClick = false;
+      firstPressedAt = event.timeStamp;
+    }
+    fingers.set(event.pointerId, { x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY });
+    if (threeFinger) {
+      threeFinger.canceled = true;
+    } else if (fingers.size === 3) {
+      const points = [...fingers.values()];
+      threeFinger = { layer: gesture.layer, rotation: gesture.layer.rotation, points, center: centerOf(points),
+        joinedInTime: event.timeStamp - firstPressedAt <= 200, frame: 0 };
+    } else beginGesture();
+    if (fingers.size >= 2) {
       if (gesture.layer.kind === "character") view.app?.setScenePinching(true);
       captureGesture();
       event.stopPropagation();
     }
   }, { capture: true });
   stage.addEventListener("pointermove", event => {
-    if (!fingers.has(event.pointerId) || !gesture) return;
-    fingers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const finger = fingers.get(event.pointerId);
+    if (!finger || !gesture) return;
+    const point = { ...finger, x: event.clientX, y: event.clientY };
+    fingers.set(event.pointerId, point);
+    if (Math.hypot(point.x - point.downX, point.y - point.downY) > 12) tapMoved = true;
+    if (threeFinger) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!threeFinger.frame && !threeFinger.released && !threeFinger.canceled) {
+        threeFinger.frame = requestAnimationFrame(rotateGesture);
+      }
+      return;
+    }
     const { layer, bounds } = gesture;
     if (!layers.includes(layer)) return;
     const points = [...fingers.values()];
-    const center = points.length === 2 ? { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 } : points[0];
+    const center = centerOf(points);
     if (!moving) {
       if (Math.hypot(center.x - gesture.center.x, center.y - gesture.center.y) < 8) return;
       captureGesture();
@@ -471,19 +538,39 @@
     const ratio = layer.scale / gesture.scale;
     layer.x = clamp((center.x - bounds.left - bounds.width / 2 - (gesture.center.x - bounds.left - bounds.width / 2 - gesture.x * bounds.width) * ratio) / bounds.width, -.8, .8);
     layer.y = clamp((center.y - bounds.top - bounds.height / 2 - (gesture.center.y - bounds.top - bounds.height / 2 - gesture.y * bounds.height) * ratio) / bounds.height, -.8, .8);
-    const node = layer.kind === "character" ? $("#canvas") : nodes.get(layer.id);
-    if (node) applyNode(layer, node, layers.indexOf(layer));
-    if (layer === current() && !$("#scene-editor").hidden) editSelected();
+    paintGestureLayer(layer);
   }, { capture: true });
   function endGesture(event) {
     if (event.type === "lostpointercapture" && event.target !== stage) return;
-    if (!fingers.delete(event.pointerId)) return;
-    beginGesture();
-    if (moving && !fingers.size) {
-      moving = false;
-      view.app?.setScenePinching(false);
-      save();
+    const finger = fingers.get(event.pointerId);
+    if (!finger) return;
+    if (threeFinger) {
+      if (event.type !== "pointerup") threeFinger.canceled = true;
+      if (Math.hypot(event.clientX - finger.downX, event.clientY - finger.downY) > 12) tapMoved = true;
+      rotateGesture();
+      threeFinger.released = true;
     }
+    fingers.delete(event.pointerId);
+    if (fingers.size) {
+      if (!threeFinger) beginGesture();
+      return;
+    }
+    const chord = threeFinger;
+    if (chord && chord.joinedInTime && !chord.canceled && !chord.rotating && !tapMoved &&
+        event.timeStamp - firstPressedAt <= 290 && layers.includes(chord.layer)) {
+      const { layer, center } = chord;
+      const last = previousThreeTap;
+      if (last?.layer === layer && firstPressedAt - last.time <= 360 &&
+          Math.hypot(center.x - last.center.x, center.y - last.center.y) <= 44) {
+        Object.assign(layer, layer.kind === "character" ? characterPlacement : materialPlacement);
+        paintGestureLayer(layer);
+        previousThreeTap = null;
+      } else previousThreeTap = { layer, center, time: event.timeStamp };
+    } else previousThreeTap = null;
+    gesture = threeFinger = null;
+    if (moving) view.app?.setScenePinching(false);
+    moving = false;
+    if (changed) save();
   }
   window.addEventListener("pointerup", endGesture, { capture: true });
   window.addEventListener("pointercancel", endGesture, { capture: true });
@@ -505,7 +592,7 @@
     try {
       const contents = new Blob([await file.arrayBuffer()], {type: file.type});
       await media(id, contents);
-      const layer = { id, media: id, kind: file.type.startsWith("video/") ? "video" : "image", name: file.name, opacity: 1, visible: true, scale: 1, x: 0, y: 0 };
+      const layer = { id, media: id, kind: file.type.startsWith("video/") ? "video" : "image", name: file.name, opacity: 1, visible: true, ...materialPlacement };
       layers.splice(Math.max(1, layers.findIndex(item => item.kind === "character")), 0, layer);
       selected = id; update(); message();
     } catch (error) {
@@ -513,37 +600,24 @@
       message("素材读取或保存失败，请重新选择文件。");
     }
   }
-  $("#apply-wallpaper").onclick = $("#welcome-wallpaper").onclick = async () => {
-    if (wallpaperApplied || save()) {
-      wallpaperChanging = true;
-      updateWallpaperButton();
-      try {
-        if (!wallpaperApplied) await publishScene();
-        native.applyWallpaper();
-      } catch (error) {
-        wallpaperChanging = false;
-        updateWallpaperButton();
-        showAppNotice(error.message);
-      }
-    }
-    else showAppNotice("壁纸场景保存失败，请检查可用存储空间。");
-  };
-  $("#scene-apply").onclick = async () => {
-    if (wallpaperChanging || busy || !view.model) return;
-    if (!save()) return showAppNotice("壁纸场景保存失败，请检查可用存储空间。");
+  async function changeWallpaper(exit, fromEditor = false) {
+    if (wallpaper || wallpaperChanging || busy || (!exit && !view.model)) return;
+    if (!exit && !save()) return showAppNotice("壁纸场景保存失败，请检查可用存储空间。");
     wallpaperChanging = true;
     updateWallpaperButton();
     try {
-      await publishScene();
-      $("#scene-back").click();
-      setControlsCollapsed(true);
-      native.applyWallpaperScene();
+      if (!exit) await publishScene();
+      if (fromEditor) $("#scene-back").click();
+      native.changeWallpaper(exit);
     } catch (error) {
       wallpaperChanging = false;
       updateWallpaperButton();
       showAppNotice(error.message);
     }
-  };
+  }
+  $("#apply-wallpaper").onclick = () => changeWallpaper(wallpaperApplied);
+  $("#welcome-wallpaper").onclick = () => changeWallpaper(true);
+  $("#scene-apply").onclick = () => changeWallpaper(false, true);
   window.addEventListener("storage", event => {
     if (event.key !== key || !event.newValue) return;
     try {

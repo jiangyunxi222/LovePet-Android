@@ -1,13 +1,6 @@
 (() => {
   "use strict";
-  const themes = [
-    ["rose", "蔷薇", "#aa5279", "#f6e4ec"], ["peony", "牡丹", "#ac4160", "#f9e3ea"],
-    ["peach", "蜜桃", "#a45244", "#f8e7df"], ["amber", "琥珀", "#916020", "#f6edd9"],
-    ["olive", "橄榄", "#69713c", "#edf0df"], ["fern", "蕨绿", "#3f7155", "#e0efe6"],
-    ["mint", "薄荷", "#337569", "#e0f1eb"], ["lagoon", "海玻璃", "#327584", "#e0f1f3"],
-    ["sky", "晴空", "#406da3", "#e3edf9"], ["indigo", "靛蓝", "#535d9a", "#e8eafa"],
-    ["iris", "鸢尾", "#72578f", "#eee6f6"], ["plum", "梅紫", "#855375", "#f3e6ef"],
-  ];
+  const themes = JSON.parse(window.AndroidPet.themePalette());
   const root = document.documentElement;
   const dialog = document.querySelector("#theme-settings");
   const grid = document.querySelector("#theme-grid");

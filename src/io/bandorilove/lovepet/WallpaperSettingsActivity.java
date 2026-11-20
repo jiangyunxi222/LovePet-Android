@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.Dialog;
 import android.app.WallpaperManager;
 import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
@@ -74,7 +75,10 @@ public final class WallpaperSettingsActivity extends Activity {
             if (!isChangingConfigurations()) finish();
         });
         picker.setOnClickListener(view -> {
-            if (open(new Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER))
+            if (new ComponentName(this, MainActivity.class).equals(getCallingActivity())) {
+                setResult(RESULT_OK);
+                dialog.dismiss();
+            } else if (open(new Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER))
                     || open(new Intent(Intent.ACTION_SET_WALLPAPER))) dialog.dismiss();
             else body.setText(R.string.wallpaper_help_manual_picker);
         });

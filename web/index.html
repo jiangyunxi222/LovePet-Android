@@ -241,7 +241,7 @@
       </details>
       <details id="scene-stack-section" class="scene-section" open>
       <summary>图层排序</summary>
-      <p class="scene-gesture-hint">选中图层后，单指拖动 · 双指缩放</p>
+      <p class="scene-gesture-hint">选中图层后，单指拖动 · 双指缩放 · 三指旋转 · 三指双击复位</p>
       <ol id="scene-stack"></ol>
       </details>
       <details id="scene-adjust-section" class="scene-section">
@@ -251,6 +251,7 @@
         <p id="scene-base-note" hidden>原来的角色背景固定保留在底层。添加图片或视频即可覆盖，删除后自动恢复。</p>
         <label id="scene-opacity-row">透明度<input id="scene-opacity" type="range" min="0" max="100"><output id="scene-opacity-value"></output></label>
         <label id="scene-scale-row">大小<input id="scene-scale" type="range" min="30" max="300"><output id="scene-scale-value"></output></label>
+        <label id="scene-rotation-row">旋转<input id="scene-rotation" type="range" min="-180" max="180" step="1"><output id="scene-rotation-value"></output></label>
         <div class="scene-position">
           <label>左右<input id="scene-x" type="range" min="-80" max="80"></label>
           <label>上下<input id="scene-y" type="range" min="-80" max="80"></label>
@@ -282,6 +283,7 @@
     <button id="close-pet-menu">关闭菜单</button>
     <button id="open-panel">打开面板</button>
     <button data-loop="action">循环动作</button>
+    <button data-loop="expression">循环表情</button>
     <button data-loop="voice">循环语音</button>
     <button data-loop="costume">循环换装</button>
     <button id="pet-reset">恢复待机</button>

@@ -27,6 +27,7 @@ import android.view.Gravity;
 import android.view.PixelCopy;
 import android.view.View;
 import android.view.WindowInsets;
+import android.view.animation.AccelerateDecelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
 import android.webkit.WebView;
 import android.webkit.ValueCallback;
@@ -55,8 +56,14 @@ public final class MainActivity extends Activity {
     private static final int WALLPAPER_RESTORE = 10;
     private static final int WALLPAPER_RESTORE_SETTINGS = 11;
     private static final int WALLPAPER_RESTORE_PHOTO = 12;
+    private static final int WALLPAPER_PERMISSION_HELP = 13;
     private static final long WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS = 1500;
+    private static final long WALLPAPER_COVER_ENTER_MS = 240;
+    private static final long WALLPAPER_COVER_HOLD_MS = 500;
+    private static final long WALLPAPER_COVER_EXIT_MS = 360;
+    private static final long WALLPAPER_RESULT_SETTLE_MS = 150;
     private static final String SYSTEM_PHOTO_PICKER = "androidx.activity.result.contract.action.PICK_IMAGES";
+    private enum WallpaperTransition { IDLE, ENTERING, COVERED, RELOADING, HOLDING, REVEALING, SETTLING }
     private ValueCallback<Uri[]> scenePicker;
     private static WeakReference<MainActivity> active = new WeakReference<>(null);
     private final ExecutorService imports = Executors.newSingleThreadExecutor();
@@ -68,8 +75,11 @@ public final class MainActivity extends Activity {
     private ModelStore store;
     private FrameLayout frame;
     private Insets panelInsets = Insets.NONE;
-    private View startupCover;
+    private View panelCover;
+    private boolean panelCoverFading;
+    private boolean startupPanelCover;
     private final Runnable startupTimeout = () -> showPlayerError("应用加载超时，请重试。");
+    private final Runnable advanceWallpaperTransition = this::presentWallpaperResult;
     private boolean importing;
     private boolean resumed;
     private boolean immersivePreview;
@@ -83,15 +93,22 @@ public final class MainActivity extends Activity {
     private boolean wallpaperPreviewShown;
     private long wallpaperPickerStarted;
     private boolean wallpaperChanging;
-    private boolean wallpaperSuccessPending;
-    private boolean wallpaperSuccessSent;
+    private Boolean wallpaperObserved;
+    private boolean wallpaperApplySuccessPending;
+    private Boolean wallpaperDirectAllowed;
+    private boolean wallpaperDirectNeedsCheck = true;
+    private int wallpaperApplyInitialId = -1;
+    private WallpaperTransition wallpaperTransition = WallpaperTransition.IDLE;
+    private long wallpaperReloadRequest;
+    private long wallpaperTransitionUntil;
     private boolean wallpaperApplyAwaitingResult;
-    private long wallpaperSuccessId;
     private int panelLoadGeneration;
+    private boolean panelFrameResolved;
     private boolean panelModelReady;
     private boolean choosingWallpaperPhoto;
     private int restoreWallpaperId;
     private WallpaperRecovery wallpaperRecovery;
+    private WallpaperResultDialog wallpaperResultDialog;
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
@@ -102,9 +119,10 @@ public final class MainActivity extends Activity {
             wallpaperPickerPaused = wallpaperChanging = externalPicker = wallpaperPicker != 0;
             wallpaperPreviewShown = saved.getBoolean("wallpaperPreviewShown");
             wallpaperPickerStarted = saved.getLong("wallpaperPickerStarted");
-            wallpaperSuccessPending = saved.getBoolean("wallpaperSuccessPending");
+            wallpaperApplySuccessPending = saved.getBoolean("wallpaperSuccessPending");
+            if (saved.containsKey("wallpaperObserved")) wallpaperObserved = saved.getBoolean("wallpaperObserved");
             wallpaperApplyAwaitingResult = saved.getBoolean("wallpaperApplyAwaitingResult");
-            wallpaperSuccessId = saved.getLong("wallpaperSuccessId");
+            wallpaperApplyInitialId = saved.getInt("wallpaperApplyInitialId", -1);
             if (saved.getBoolean("choosingWallpaperPhoto")) {
                 choosingWallpaperPhoto = externalPicker = true;
                 restoreWallpaperId = saved.getInt("restoreWallpaperId");
@@ -113,6 +131,9 @@ public final class MainActivity extends Activity {
         active = new WeakReference<>(this);
         store = new ModelStore(this);
         wallpaperRecovery = new WallpaperRecovery(this);
+        if (getPreferences(MODE_PRIVATE).contains("wallpaperDirectAllowed")) {
+            wallpaperDirectAllowed = getPreferences(MODE_PRIVATE).getBoolean("wallpaperDirectAllowed", false);
+        }
         frame = new FrameLayout(this);
         frame.setBackgroundResource(R.color.startup_background);
         frame.setOnApplyWindowInsetsListener((view, all) -> {
@@ -137,17 +158,22 @@ public final class MainActivity extends Activity {
 
     private void attachPlayer() {
         frame.removeAllViews();
-        View cover = getLayoutInflater().inflate(R.layout.wallpaper_recovery_cover, frame, false);
-        cover.setClickable(true);
-        frame.addView(cover);
-        startupCover = cover;
+        View cover = showPanelCover();
+        startupPanelCover = true;
         Runnable open = () -> startPanel(cover);
         frame.getViewTreeObserver().registerFrameCommitCallback(() -> frame.post(open));
         frame.postDelayed(open, 150);
     }
 
+    private View showPanelCover() {
+        panelCover = getLayoutInflater().inflate(R.layout.wallpaper_recovery_cover, frame, false);
+        panelCover.setClickable(true);
+        frame.addView(panelCover);
+        return panelCover;
+    }
+
     private void startPanel(View cover) {
-        if (startupCover != cover || player != null || isFinishing() || isDestroyed()) return;
+        if (panelCover != cover || player != null || isFinishing() || isDestroyed()) return;
         try {
             if (WebView.getCurrentWebViewPackage() == null) {
                 throw new IllegalStateException("Android WebView provider is unavailable");
@@ -157,8 +183,7 @@ public final class MainActivity extends Activity {
                     this::setSettingsVisible, this::setImmersivePreview,
                     () -> showPlayerError("网页渲染进程已退出，请重试。若再次发生，请更新系统 WebView。"));
             frame.addView(player.view(), 0, new FrameLayout.LayoutParams(-1, -1));
-            player.onApplyWallpaper(this::applyWallpaper);
-            player.onApplyWallpaperScene(this::applyWallpaperScene);
+            player.onChangeWallpaper(this::changeWallpaper);
             player.setPaused(!resumed);
             player.load();
             frame.postDelayed(startupTimeout, 30_000);
@@ -170,26 +195,46 @@ public final class MainActivity extends Activity {
 
     void panelLoading(int generation) {
         panelLoadGeneration = generation;
+        panelFrameResolved = false;
         panelModelReady = false;
+        if (panelCoverFading && wallpaperTransition == WallpaperTransition.IDLE) {
+            panelCover.animate().cancel();
+            panelCover.setAlpha(1f);
+            panelCoverFading = false;
+        }
     }
 
     void panelFrameReady(int generation, boolean ready) {
         if (generation != panelLoadGeneration) return;
+        panelFrameResolved = true;
         panelModelReady = ready;
-        View cover = startupCover;
-        if (cover == null) {
-            if (player != null) player.panelFramePresented(generation, ready);
-            showWallpaperSuccess();
-            return;
+        if (ready && wallpaperTransition == WallpaperTransition.HOLDING) {
+            wallpaperTransitionUntil = SystemClock.uptimeMillis() + WALLPAPER_COVER_HOLD_MS;
         }
+        presentWallpaperResult();
+        fadeStartupCover();
+    }
+
+    private void fadeStartupCover() {
+        if (!startupPanelCover || panelCoverFading || !panelFrameResolved || !resumed
+                || wallpaperChanging || wallpaperTransition != WallpaperTransition.IDLE) return;
+        fadePanelCover(180, () -> {});
+    }
+
+    private void fadePanelCover(long duration, Runnable finished) {
+        View cover = panelCover;
+        panelCoverFading = true;
         frame.removeCallbacks(startupTimeout);
-        cover.animate().cancel();
-        cover.animate().alpha(0f).setDuration(180).setInterpolator(new DecelerateInterpolator()).withEndAction(() -> {
-            frame.removeView(cover);
-            startupCover = null;
-            if (generation == panelLoadGeneration && player != null) player.panelFramePresented(generation, panelModelReady);
-            showWallpaperSuccess();
-        }).start();
+        cover.animate().alpha(0f).setDuration(duration).withLayer()
+                .setInterpolator(startupPanelCover && wallpaperTransition == WallpaperTransition.IDLE
+                        ? new DecelerateInterpolator() : new AccelerateDecelerateInterpolator())
+                .withEndAction(() -> {
+                    frame.removeView(cover);
+                    panelCover = null;
+                    panelCoverFading = false;
+                    startupPanelCover = false;
+                    finished.run();
+                }).start();
     }
 
     private void showPlayerError(String message) {
@@ -227,13 +272,17 @@ public final class MainActivity extends Activity {
     }
 
     private void releasePlayer() {
+        panelFrameResolved = false;
         panelModelReady = false;
-        wallpaperSuccessSent = false;
+        wallpaperTransition = WallpaperTransition.IDLE;
+        startupPanelCover = false;
+        panelCoverFading = false;
         frame.removeCallbacks(startupTimeout);
-        if (startupCover != null) {
-            startupCover.animate().cancel();
-            frame.removeView(startupCover);
-            startupCover = null;
+        frame.removeCallbacks(advanceWallpaperTransition);
+        if (panelCover != null) {
+            panelCover.animate().cancel();
+            frame.removeView(panelCover);
+            panelCover = null;
         }
         if (scenePicker != null) {
             scenePicker.onReceiveValue(null);
@@ -253,6 +302,11 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        if (wallpaperPicker != 0 && wallpaperPickerPaused) {
+            boolean wanted = wallpaperPicker <= WALLPAPER_SETTINGS;
+            boolean applied = hasWallpaper(WallpaperManager.FLAG_SYSTEM);
+            if (wanted ? wallpaperApplySucceeded(applied, false) : !applied) beginWallpaperTransition(true);
+        }
         setImmersivePreview(immersivePreview);
         DesktopRuntime.queryPet();
         if (player != null) {
@@ -261,16 +315,20 @@ public final class MainActivity extends Activity {
         }
         updateWallpaperStatus();
         updatePermissionStatus();
-        showWallpaperSuccess();
+        fadeStartupCover();
         if (wallpaperPicker != 0 && wallpaperPickerPaused) {
             int request = wallpaperPicker;
+            int attempt = wallpaperPickerAttempt;
             // A few system pickers return to the app without delivering an activity result.
-            frame.postDelayed(() -> finishWallpaperPicker(request, false), 250);
+            frame.postDelayed(() -> {
+                if (attempt == wallpaperPickerAttempt) finishWallpaperPicker(request, false);
+            }, 250);
         }
     }
 
     @Override protected void onPause() {
         if (wallpaperPicker != 0) wallpaperPickerPaused = true;
+        else if (!wallpaperChanging && !externalPicker) wallpaperDirectNeedsCheck = true;
         resumed = false;
         if (player != null) player.setPaused(true);
         updateDesktopVisibility();
@@ -282,7 +340,6 @@ public final class MainActivity extends Activity {
         if (focused) {
             updateWallpaperStatus();
             updatePermissionStatus();
-            showWallpaperSuccess();
             if (wallpaperPickerStayedInApp(wallpaperPicker)
                     && SystemClock.uptimeMillis() - wallpaperPickerStarted >= WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS) {
                 handleUnopenedWallpaperPicker(wallpaperPicker);
@@ -296,6 +353,11 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (wallpaperResultDialog != null) {
+            wallpaperResultDialog.setOnDismissListener(null);
+            wallpaperResultDialog.dismiss();
+            wallpaperResultDialog = null;
+        }
         if (active.get() == this) active.clear();
         updateDesktopVisibility();
         imports.shutdown();
@@ -322,15 +384,20 @@ public final class MainActivity extends Activity {
         state.putInt("wallpaperPicker", wallpaperPicker);
         state.putBoolean("wallpaperPreviewShown", wallpaperPreviewShown);
         state.putLong("wallpaperPickerStarted", wallpaperPickerStarted);
-        state.putBoolean("wallpaperSuccessPending", wallpaperSuccessPending);
+        state.putBoolean("wallpaperSuccessPending", wallpaperApplySuccessPending);
+        if (wallpaperObserved != null) state.putBoolean("wallpaperObserved", wallpaperObserved);
         state.putBoolean("wallpaperApplyAwaitingResult", wallpaperApplyAwaitingResult);
-        state.putLong("wallpaperSuccessId", wallpaperSuccessId);
+        state.putInt("wallpaperApplyInitialId", wallpaperApplyInitialId);
         state.putBoolean("choosingWallpaperPhoto", choosingWallpaperPhoto);
         state.putInt("restoreWallpaperId", restoreWallpaperId);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == WALLPAPER_PERMISSION_HELP) {
+            if (result == RESULT_OK) changeWallpaper(false, true);
+            return;
+        }
         if (request >= WALLPAPER_PREVIEW && request <= WALLPAPER_RESTORE_SETTINGS) {
             finishWallpaperPicker(request, result == RESULT_OK);
             return;
@@ -554,23 +621,19 @@ public final class MainActivity extends Activity {
         return true;
     }
 
-    private void applyWallpaper() {
-        applyWallpaper(true);
+    private void changeWallpaper(boolean exit) {
+        changeWallpaper(exit, false);
     }
 
-    private void applyWallpaperScene() {
-        applyWallpaper(false);
-    }
-
-    private void applyWallpaper(boolean toggle) {
+    private void changeWallpaper(boolean exit, boolean preferList) {
         if (externalPicker || wallpaperChanging || isFinishing()) {
             updateWallpaperStatus();
             return;
         }
         boolean applied = hasWallpaper(WallpaperManager.FLAG_SYSTEM);
-        if (toggle && applied) {
+        if (exit) {
             updateWallpaperStatus();
-            exitWallpaper();
+            if (applied) exitWallpaper();
             return;
         }
         if (store.active() == null) {
@@ -580,10 +643,11 @@ public final class MainActivity extends Activity {
         }
         WallpaperManager manager = WallpaperManager.getInstance(this);
         wallpaperApplyAwaitingResult = true;
-        wallpaperSuccessPending = wallpaperSuccessSent = false;
+        wallpaperApplySuccessPending = false;
+        wallpaperApplyInitialId = applied ? manager.getWallpaperId(WallpaperManager.FLAG_SYSTEM) : -1;
         boolean supported = manager.isWallpaperSupported();
         boolean allowed = supported && manager.isSetWallpaperAllowed();
-        if (applied && allowed) {
+        if (applied && allowed && Boolean.TRUE.equals(wallpaperDirectAllowed) && !wallpaperDirectNeedsCheck) {
             // The editor has already published its scene to the independent desktop process.
             wallpaperChanging = false;
             updateWallpaperStatus();
@@ -592,12 +656,24 @@ public final class MainActivity extends Activity {
             return;
         }
         if (supported && !applied) {
-            wallpaperRecovery.rememberPrevious(manager.getWallpaperId(WallpaperManager.FLAG_SYSTEM),
-                    wallpaperComponent(WallpaperManager.FLAG_SYSTEM));
+            rememberWallpaperBeforeApply(manager);
         }
-        if (allowed && launchWallpaperPicker(wallpaperPreview(new ComponentName(this, PetWallpaperService.class)),
-                WALLPAPER_PREVIEW)) return;
-        openWallpaperList();
+        if (!allowed) {
+            fallbackFromWallpaperPreview();
+        } else if (preferList || (Boolean.FALSE.equals(wallpaperDirectAllowed) && !wallpaperDirectNeedsCheck)) {
+            openWallpaperList();
+        } else if (!launchWallpaperPicker(wallpaperPreview(new ComponentName(this, PetWallpaperService.class)),
+                WALLPAPER_PREVIEW)) {
+            fallbackFromWallpaperPreview();
+        }
+    }
+
+    private void rememberWallpaperBeforeApply(WallpaperManager manager) {
+        int screen = WallpaperManager.FLAG_SYSTEM;
+        ComponentName previous = wallpaperComponent(screen);
+        if (!new ComponentName(this, PetWallpaperService.class).equals(previous)) {
+            wallpaperRecovery.rememberPrevious(manager.getWallpaperId(screen), previous);
+        }
     }
 
     private void chooseWallpaperPhoto() {
@@ -624,16 +700,17 @@ public final class MainActivity extends Activity {
         wallpaperPreviewShown = false;
         wallpaperPickerStarted = SystemClock.uptimeMillis();
         wallpaperChanging = externalPicker = true;
+        if (request >= WALLPAPER_RESTORE) {
+            wallpaperRecovery.beginExit(WallpaperManager.getInstance(this).getWallpaperId(WallpaperManager.FLAG_SYSTEM));
+        }
         setSettingsVisible(settingsVisible);
         updateWallpaperStatus();
         if (launchPicker(intent, request)) {
-            if (request <= WALLPAPER_SETTINGS) {
-                frame.postDelayed(() -> {
-                    if (wallpaperPickerAttempt == attempt && wallpaperPickerStayedInApp(request)) {
-                        handleUnopenedWallpaperPicker(request);
-                    }
-                }, WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS);
-            }
+            frame.postDelayed(() -> {
+                if (wallpaperPickerAttempt == attempt && wallpaperPickerStayedInApp(request)) {
+                    handleUnopenedWallpaperPicker(request);
+                }
+            }, WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS);
             return true;
         }
         resetWallpaperPicker();
@@ -641,6 +718,7 @@ public final class MainActivity extends Activity {
     }
 
     private void resetWallpaperPicker() {
+        if (wallpaperPicker >= WALLPAPER_RESTORE) wallpaperRecovery.cancelExit();
         wallpaperPicker = 0;
         wallpaperChanging = externalPicker = false;
         setSettingsVisible(settingsVisible);
@@ -648,14 +726,16 @@ public final class MainActivity extends Activity {
     }
 
     private boolean wallpaperPickerStayedInApp(int request) {
-        return request >= WALLPAPER_PREVIEW && request <= WALLPAPER_SETTINGS
+        return request >= WALLPAPER_PREVIEW && request <= WALLPAPER_RESTORE_SETTINGS
                 && wallpaperPicker == request && !wallpaperPickerPaused && resumed && hasWindowFocus()
                 && !isFinishing() && !isDestroyed();
     }
 
     private void handleUnopenedWallpaperPicker(int request) {
         resetWallpaperPicker();
-        if (request == WALLPAPER_PREVIEW) openWallpaperList();
+        if (request == WALLPAPER_PREVIEW) fallbackFromWallpaperPreview();
+        else if (request == WALLPAPER_RESTORE) offerWallpaperRestore();
+        else if (request == WALLPAPER_RESTORE_SETTINGS) wallpaperMessage("请长按桌面空白处更换壁纸。");
         else offerWallpaperPermission();
     }
 
@@ -666,32 +746,47 @@ public final class MainActivity extends Activity {
 
     private void finishWallpaperPicker(int request, boolean confirmed) {
         if (isDestroyed() || wallpaperPicker != request) return;
-        if (!confirmed && request <= WALLPAPER_SETTINGS && !hasWallpaper(WallpaperManager.FLAG_SYSTEM)) {
-            boolean returnedImmediately = SystemClock.uptimeMillis() - wallpaperPickerStarted < WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS;
+        boolean wanted = request <= WALLPAPER_SETTINGS;
+        boolean applied = hasWallpaper(WallpaperManager.FLAG_SYSTEM);
+        boolean succeeded = wanted ? wallpaperApplySucceeded(applied, confirmed) : !applied;
+        if (!confirmed && wanted && !succeeded) {
             boolean failedToOpen = request == WALLPAPER_PREVIEW
                     ? !wallpaperPreviewShown || !WallpaperManager.getInstance(this).isSetWallpaperAllowed()
-                    : !wallpaperPickerPaused || returnedImmediately;
+                    : !wallpaperPickerPaused;
             if (failedToOpen) {
                 handleUnopenedWallpaperPicker(request);
                 return;
             }
         }
+        if (confirmed || succeeded) beginWallpaperTransition(true);
         wallpaperPicker = 0;
         externalPicker = false;
         setSettingsVisible(settingsVisible);
-        verifyWallpaper(request <= WALLPAPER_SETTINGS, request, confirmed, confirmed ? 8 : 1);
+        verifyWallpaper(wanted, request, confirmed, confirmed ? 8 : 1);
+    }
+
+    private boolean wallpaperApplySucceeded(boolean applied, boolean confirmed) {
+        return applied && (confirmed || wallpaperApplyInitialId < 0
+                || WallpaperManager.getInstance(this).getWallpaperId(WallpaperManager.FLAG_SYSTEM) != wallpaperApplyInitialId);
     }
 
     void updatePermissionStatus() {
         if (player == null) return;
         WallpaperManager manager = WallpaperManager.getInstance(this);
-        String wallpaper = !manager.isWallpaperSupported() ? "unsupported"
-                : !manager.isSetWallpaperAllowed() ? "restricted"
-                // The OEM permission switch is separate from Android's wallpaper policy.
-                : WallpaperSettingsActivity.usesXiaomiPermissions() ? "system"
-                : hasWallpaper(WallpaperManager.FLAG_SYSTEM) || hasWallpaper(WallpaperManager.FLAG_LOCK)
-                    ? "applied" : "unapplied";
+        boolean supported = manager.isWallpaperSupported();
+        String wallpaper;
+        if (Boolean.FALSE.equals(wallpaperDirectAllowed)) wallpaper = "disabled";
+        else if (!supported) wallpaper = "unsupported";
+        else if (!manager.isSetWallpaperAllowed()) wallpaper = "disabled";
+        else wallpaper = Boolean.TRUE.equals(wallpaperDirectAllowed) ? "enabled" : "system";
         player.permissionStatus(Settings.canDrawOverlays(this), HomeVisibility.hasUsageAccess(this), wallpaper);
+    }
+
+    private void recordWallpaperDirectResult(boolean allowed) {
+        wallpaperDirectNeedsCheck = false;
+        if (Boolean.valueOf(allowed).equals(wallpaperDirectAllowed)) return;
+        wallpaperDirectAllowed = allowed;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("wallpaperDirectAllowed", allowed).apply();
     }
 
     void openPermission(String permission) {
@@ -700,7 +795,8 @@ public final class MainActivity extends Activity {
             return;
         }
         if ("wallpaper".equals(permission)) {
-            if (!openSettingsScreen(new Intent(this, WallpaperSettingsActivity.class)) && player != null) {
+            if (!launchPicker(new Intent(this, WallpaperSettingsActivity.class), WALLPAPER_PERMISSION_HELP)
+                    && player != null) {
                 player.notice(getString(R.string.wallpaper_settings_unavailable));
             }
             return;
@@ -715,19 +811,16 @@ public final class MainActivity extends Activity {
     }
 
     private boolean openUsageAccess(boolean forPlacement) {
-        Uri appUri = Uri.fromParts("package", getPackageName(), null);
-        Intent details = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, appUri);
+        Intent usage = new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS);
+        Intent details = new Intent(usage).setData(Uri.fromParts("package", getPackageName(), null));
         int flags = PackageManager.MATCH_SYSTEM_ONLY | PackageManager.MATCH_DEFAULT_ONLY;
-        ComponentName appDetails = details.resolveActivity(getPackageManager());
-        Intent scoped = new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, appUri);
-        Intent list = new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS);
-        for (Intent intent : new Intent[] {scoped, list}) {
-            ResolveInfo resolved = getPackageManager().resolveActivity(intent, flags);
+        for (Intent page : new Intent[] {details, usage}) {
+            ResolveInfo resolved = getPackageManager().resolveActivity(page, flags);
             if (resolved == null || resolved.activityInfo == null) continue;
-            ComponentName target = new ComponentName(resolved.activityInfo.packageName, resolved.activityInfo.name);
-            if (target.equals(appDetails)) continue;
-            intent.setComponent(target);
-            if (forPlacement ? launchPicker(intent, USAGE_ACCESS) : openSettingsScreen(intent)) return true;
+            if (page == details && !"com.android.settings.Settings$AppUsageAccessSettingsActivity"
+                    .equals(resolved.activityInfo.name)) continue;
+            page.setClassName(resolved.activityInfo.packageName, resolved.activityInfo.name);
+            if (forPlacement ? launchPicker(page, USAGE_ACCESS) : openSettingsScreen(page)) return true;
         }
         if (player != null) {
             player.prompt("使用情况访问",
@@ -748,9 +841,16 @@ public final class MainActivity extends Activity {
     }
 
     private void openWallpaperList() {
+        wallpaperApplyAwaitingResult = true;
         if (!launchWallpaperPicker(new Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER), WALLPAPER_LIST)) {
             offerWallpaperPermission();
         }
+    }
+
+    private void fallbackFromWallpaperPreview() {
+        recordWallpaperDirectResult(false);
+        updatePermissionStatus();
+        openWallpaperList();
     }
 
     private void offerWallpaperPermission() {
@@ -794,7 +894,10 @@ public final class MainActivity extends Activity {
     }
 
     private void restoreWallpaperPhoto(int expectedId, Uri selected) {
+        if (wallpaperChanging || isFinishing() || isDestroyed()) return;
         wallpaperChanging = true;
+        beginWallpaperTransition(selected != null);
+        wallpaperRecovery.beginExit(expectedId);
         updateWallpaperStatus();
         imports.submit(() -> {
             try {
@@ -811,6 +914,7 @@ public final class MainActivity extends Activity {
             } catch (IOException | SecurityException error) {
                 Log.w("BandoriLovePet", "Could not restore wallpaper", error);
                 runOnUiThread(() -> {
+                    wallpaperRecovery.cancelExit();
                     if (isDestroyed()) return;
                     wallpaperChanging = false;
                     updateWallpaperStatus();
@@ -848,76 +952,214 @@ public final class MainActivity extends Activity {
     }
 
     void updateWallpaperStatus() {
-        if (player != null) player.wallpaperStatus(hasWallpaper(WallpaperManager.FLAG_SYSTEM), wallpaperChanging);
+        boolean applied = hasWallpaper(WallpaperManager.FLAG_SYSTEM);
+        boolean idle = !wallpaperChanging && !externalPicker && !wallpaperApplyAwaitingResult;
+        boolean changedOutsidePicker = idle && wallpaperObserved != null && wallpaperObserved != applied;
+        publishWallpaperStatus(applied);
+        if (applied) {
+            if (changedOutsidePicker) completeWallpaperApply();
+        } else if (idle) {
+            if (changedOutsidePicker || wallpaperRecovery.exitChangedWallpaper()) completeWallpaperExit();
+        }
+        presentWallpaperResult();
+    }
+
+    private void publishWallpaperStatus(boolean applied) {
+        wallpaperObserved = applied;
+        if (player != null) player.wallpaperStatus(applied, wallpaperChanging);
     }
 
     void wallpaperPageReady() {
         updatePanelInsets();
         updateWallpaperStatus();
         updatePermissionStatus();
-        showWallpaperSuccess();
     }
 
     private void updatePanelInsets() {
         if (player != null && player.isPageReady()) player.panelInsets(panelInsets);
     }
 
-    private void showWallpaperSuccess() {
-        if (!wallpaperSuccessPending || wallpaperSuccessSent || !panelModelReady || startupCover != null || !resumed || !hasWindowFocus()
-                || isFinishing() || isDestroyed() || player == null || !player.isPageReady()) return;
-        wallpaperSuccessSent = true;
-        player.showWallpaperSuccess(wallpaperSuccessId);
-    }
-
     private void completeWallpaperApply() {
-        if (!wallpaperApplyAwaitingResult) return;
         wallpaperApplyAwaitingResult = false;
-        wallpaperSuccessPending = true;
-        wallpaperSuccessSent = false;
-        ++wallpaperSuccessId;
-        showWallpaperSuccess();
+        wallpaperRecovery.acknowledgeExit();
+        wallpaperApplySuccessPending = true;
+        presentWallpaperResult();
     }
 
-    void dismissWallpaperSuccess(long request, boolean viewDesktop) {
-        if (request != wallpaperSuccessId || !wallpaperSuccessPending || !wallpaperSuccessSent) return;
-        wallpaperSuccessPending = wallpaperSuccessSent = false;
-        if (viewDesktop) {
-            startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    private void completeWallpaperExit() {
+        wallpaperApplyAwaitingResult = false;
+        wallpaperApplySuccessPending = false;
+        wallpaperRecovery.confirmExit();
+        presentWallpaperResult();
+    }
+
+    private void presentWallpaperResult() {
+        if (!resumed || isFinishing() || isDestroyed() || wallpaperChanging || externalPicker || wallpaperResultDialog != null
+                || wallpaperObserved == null) return;
+        boolean applied = wallpaperObserved;
+        boolean pending = applied ? wallpaperApplySuccessPending : wallpaperRecovery.exitConfirmationPending();
+        if (wallpaperTransition == WallpaperTransition.IDLE) {
+            if (!pending) return;
+            beginWallpaperTransition(!hasWindowFocus());
         }
+        switch (wallpaperTransition) {
+            case COVERED:
+                if (!pending) {
+                    revealWallpaperPanel(false);
+                } else if (player != null && player.isPageReady() && panelFrameResolved) {
+                    if (startupPanelCover) {
+                        if (panelModelReady) holdWallpaperCover();
+                        else showPlayerError("模型重新加载失败，请重试。");
+                    } else {
+                        wallpaperTransition = WallpaperTransition.RELOADING;
+                        frame.postDelayed(startupTimeout, 30_000);
+                        player.reloadWallpaperPanel(++wallpaperReloadRequest);
+                    }
+                }
+                return;
+            case HOLDING:
+                if (!pending || (panelModelReady && wallpaperTransitionTimeReached())) {
+                    revealWallpaperPanel(pending);
+                }
+                return;
+            case SETTLING:
+                if (!pending) {
+                    finishWallpaperTransition();
+                    return;
+                }
+                if (!panelModelReady || !hasWindowFocus() || !wallpaperTransitionTimeReached()) return;
+                break;
+            default:
+                return;
+        }
+        wallpaperResultDialog = new WallpaperResultDialog(this, applied, this::viewDesktop);
+        wallpaperResultDialog.setOnDismissListener(dialog -> {
+            wallpaperResultDialog = null;
+            finishWallpaperTransition();
+            if (applied) wallpaperApplySuccessPending = false;
+            else wallpaperRecovery.acknowledgeExit();
+            frame.post(this::presentWallpaperResult);
+        });
+        wallpaperResultDialog.show();
+        Log.d("BandoriLovePet", "Wallpaper result shown");
+    }
+
+    private void beginWallpaperTransition(boolean returningFromPicker) {
+        if (wallpaperTransition != WallpaperTransition.IDLE) return;
+        boolean hasCover = panelCover != null;
+        View cover = hasCover ? panelCover : showPanelCover();
+        if (panelCoverFading) {
+            cover.animate().cancel();
+            panelCoverFading = false;
+        }
+        if (returningFromPicker || (hasCover && cover.getAlpha() == 1f)) {
+            cover.setAlpha(1f);
+            wallpaperTransition = WallpaperTransition.COVERED;
+            return;
+        }
+        wallpaperTransition = WallpaperTransition.ENTERING;
+        if (!hasCover) cover.setAlpha(0f);
+        cover.animate().alpha(1f).setDuration(WALLPAPER_COVER_ENTER_MS).withLayer()
+                .setInterpolator(new AccelerateDecelerateInterpolator()).withEndAction(() -> {
+                    wallpaperTransition = WallpaperTransition.COVERED;
+                    presentWallpaperResult();
+                }).start();
+    }
+
+    void wallpaperPanelReady(long request, boolean ready) {
+        if (request != wallpaperReloadRequest || wallpaperTransition != WallpaperTransition.RELOADING) return;
+        if (!ready) {
+            showPlayerError("模型重新加载失败，请重试。");
+            return;
+        }
+        panelModelReady = true;
+        holdWallpaperCover();
+    }
+
+    private void holdWallpaperCover() {
+        frame.removeCallbacks(startupTimeout);
+        wallpaperTransition = WallpaperTransition.HOLDING;
+        wallpaperTransitionUntil = SystemClock.uptimeMillis() + WALLPAPER_COVER_HOLD_MS;
+        Log.d("BandoriLovePet", "Wallpaper panel ready; holding cover");
+        wallpaperTransitionTimeReached();
+    }
+
+    private boolean wallpaperTransitionTimeReached() {
+        frame.removeCallbacks(advanceWallpaperTransition);
+        long remaining = wallpaperTransitionUntil - SystemClock.uptimeMillis();
+        if (remaining <= 0) return true;
+        frame.postDelayed(advanceWallpaperTransition, remaining);
+        return false;
+    }
+
+    private void revealWallpaperPanel(boolean pending) {
+        frame.removeCallbacks(advanceWallpaperTransition);
+        wallpaperTransition = WallpaperTransition.REVEALING;
+        if (pending) Log.d("BandoriLovePet", "Wallpaper cover fade started");
+        fadePanelCover(WALLPAPER_COVER_EXIT_MS, () -> {
+            if (!pending) {
+                finishWallpaperTransition();
+                presentWallpaperResult();
+                return;
+            }
+            Log.d("BandoriLovePet", "Wallpaper cover fade finished");
+            wallpaperTransition = WallpaperTransition.SETTLING;
+            wallpaperTransitionUntil = SystemClock.uptimeMillis() + WALLPAPER_RESULT_SETTLE_MS;
+            presentWallpaperResult();
+        });
+    }
+
+    private void finishWallpaperTransition() {
+        wallpaperTransition = WallpaperTransition.IDLE;
+        if (player != null) player.finishWallpaperPanelReload();
+    }
+
+    private void viewDesktop() {
+        startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
     }
 
     private void verifyWallpaper(boolean wanted, int request, boolean confirmed, int retries) {
         if (isFinishing() || isDestroyed() || externalPicker) return;
         boolean applied = hasWallpaper(WallpaperManager.FLAG_SYSTEM);
-        if (applied != wanted && retries > 0) {
+        boolean succeeded = wanted ? wallpaperApplySucceeded(applied, confirmed) : !applied;
+        if (!succeeded && retries > 0) {
             frame.postDelayed(() -> verifyWallpaper(wanted, request, confirmed, retries - 1), 400);
             return;
         }
         wallpaperChanging = false;
-        updateWallpaperStatus();
+        publishWallpaperStatus(applied);
+        if (request == WALLPAPER_PREVIEW && succeeded) recordWallpaperDirectResult(true);
         updatePermissionStatus();
         Log.i("BandoriLovePet", "Wallpaper verification: request=" + request + ", requested=" + wanted + ", active=" + applied);
-        if (applied == wanted) {
-            if (applied) {
+        if (succeeded) {
+            if (!wanted) {
+                completeWallpaperExit();
+            } else if (wallpaperApplyAwaitingResult) {
                 completeWallpaperApply();
-            } else if (player != null) player.notice("已恢复主屏幕壁纸");
+            }
             return;
         }
+        if (!wanted) wallpaperRecovery.cancelExit();
         if (player == null || !confirmed) {
             if (wanted) wallpaperApplyAwaitingResult = false;
+            presentWallpaperResult();
+            fadeStartupCover();
             return;
         }
         if (!wanted) {
             if (request == WALLPAPER_RESTORE_SETTINGS) wallpaperMessage("原壁纸未恢复。");
             else offerWallpaperRestore();
-        } else if (hasWallpaper(WallpaperManager.FLAG_LOCK)) {
-            player.prompt("只设置了锁屏", "请再选择「主屏幕」。", "打开壁纸列表", this::openWallpaperList);
         } else if (request == WALLPAPER_PREVIEW) {
-            openWallpaperList();
+            fallbackFromWallpaperPreview();
+        } else if (hasWallpaper(WallpaperManager.FLAG_LOCK)) {
+            wallpaperApplyAwaitingResult = false;
+            player.prompt("只设置了锁屏", "请再选择「主屏幕」。", "打开壁纸列表", this::openWallpaperList);
         } else {
             offerWallpaperPermission();
         }
+        presentWallpaperResult();
+        fadeStartupCover();
     }
 
     private void wallpaperMessage(String message) {

@@ -62,6 +62,21 @@ public final class PetWallpaperService extends WallpaperService {
         for (PetEngine engine : engines) if (engine.player != null) engine.player.updateTouchMenu(enabled, thirdParty);
     }
 
+    static void updatePetStatus() {
+        for (PetEngine engine : engines) if (engine.player != null) engine.player.status();
+    }
+
+    private static void updatePlaybackOwner() {
+        PetEngine owner = null;
+        for (PetEngine engine : engines) {
+            if (engine.player == null || !engine.visible || engine.surfaceWidth <= 0) continue;
+            if (owner == null || (engine.isPreview() && !owner.isPreview())) owner = engine;
+        }
+        for (PetEngine engine : engines) {
+            if (engine.player != null) engine.player.setPlaybackActive(engine == owner);
+        }
+    }
+
     static void receive(JSONObject command, boolean sound) {
         for (PetEngine engine : engines) {
             if (engine.player != null) engine.player.receive(command, sound && engine.visible);
@@ -124,6 +139,7 @@ public final class PetWallpaperService extends WallpaperService {
                 if (display.getSurface() != holder.getSurface()) display.setSurface(holder.getSurface());
                 setRendererVisible(visible);
                 if (player != null) player.setWallpaperTiltVisible(visible);
+                updatePlaybackOwner();
                 return;
             }
             startRenderer();
@@ -186,6 +202,7 @@ public final class PetWallpaperService extends WallpaperService {
                 rendererVisible = visible && surfaceWidth > 0;
                 renderer.wallpaperVisible(rendererVisible);
                 renderer.setWallpaperTiltVisible(rendererVisible);
+                updatePlaybackOwner();
             } catch (RuntimeException error) {
                 Log.e("BandoriLovePet", "Wallpaper WebView startup failed", error);
                 rendererFailed();
@@ -208,6 +225,7 @@ public final class PetWallpaperService extends WallpaperService {
                 setRendererVisible(surfaceWidth > 0);
                 player.setWallpaperTiltVisible(surfaceWidth > 0);
             }
+            updatePlaybackOwner();
         }
 
         private void setRendererVisible(boolean showing) {
@@ -328,6 +346,7 @@ public final class PetWallpaperService extends WallpaperService {
             surfaceWidth = 0;
             surfaceHeight = 0;
             nextRendererRetryAt = 0;
+            updatePlaybackOwner();
         }
 
         private void release() {
@@ -350,6 +369,7 @@ public final class PetWallpaperService extends WallpaperService {
                 display.release();
                 display = null;
             }
+            updatePlaybackOwner();
         }
 
         @Override public void onDestroy() {

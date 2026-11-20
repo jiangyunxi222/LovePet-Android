@@ -18,18 +18,22 @@ const petMenuButton = $("#pet-menu-button");
 const settings = $("#settings");
 const appPrompt = $("#app-prompt");
 let promptId, promptCallback, noticeTimer;
-let wallpaperSuccessQueued = null;
-let wallpaperSuccessShown = null;
 let panelLoadSequence = 0;
-let panelRenderReady = false;
+let wallpaperPanelReloading = false;
 let desktopCrop;
 let desktopModelScale = 1, desktopRasterScale = 1;
+let desktopRotation = 0;
 let desktopMoving = false;
 const captionDrag = enableCaptionDrag(caption, desktopControlArea, (rect) => {
   if (pet) reportPetBounds("caption", rect);
 });
 const loops = new Set();
-const timers = new Map();
+const loopIntervals = { costume: 35000, voice: 15000, expression: 8000, action: 1600 };
+const loopDeadlines = new Map();
+const loopSource = Math.random().toString(36).slice(2);
+let loopTimer, loopInFlight, costumeChange;
+let loopSequence = 0, playbackGeneration = 0;
+let panelPlaybackActive = false, wallpaperPlaybackActive = false;
 let favoriteIds = new Set();
 let showFavorites = false;
 let overlayVisible = false;
@@ -39,6 +43,7 @@ let busy = false;
 let wallpaperApplied = false;
 let wallpaperChanging = false;
 let audioContext, audioNode, analyser, samples;
+let voiceEndsAt = 0;
 let voiceGeneration = 0;
 let mouth = 0;
 let engines;
@@ -54,7 +59,10 @@ window.setPanelInsets = (...insets) => {
   }
 };
 document.documentElement.classList.toggle("wallpaper", wallpaper);
-if (pet) setDesktopScale(native.desktopScale());
+if (pet) {
+  setDesktopScale(native.desktopScale());
+  desktopRotation = native.desktopRotation();
+}
 
 const asset = (path, base = "/media/" + view.session.version + "/") =>
   new URL(path.split("/").map(encodeURIComponent).join("/"), location.origin + base).href;
@@ -123,12 +131,7 @@ function petStatus(showing, visible, homeOnly) {
   if (overlayVisible === visible) return;
   overlayVisible = visible;
   if (pet && !visible && !petMenu.hidden) showPetMenu(false);
-  if (!ownsPlayback()) {
-    stopVoice();
-    for (const timer of timers.values()) clearTimeout(timer);
-  } else {
-    for (const kind of loops) schedule(kind, 400);
-  }
+  updateLoopOwner();
 }
 
 function updateWallpaperButton() {
@@ -155,10 +158,10 @@ window.setPermissionStatus = (overlay, usage, wallpaperMode) => {
     status.textContent = granted ? "已开启" : "未开启";
   }
   const wallpaperState = {
-    applied: "已应用", unapplied: "未应用", system: "系统中查看", unsupported: "不支持", restricted: "未开启",
+    enabled: "已开启", disabled: "未开启", system: "系统中查看", unsupported: "不支持",
   };
   $("#perm-wallpaper").textContent = wallpaperState[wallpaperMode] || wallpaperState.system;
-  $("#perm-wallpaper").dataset.status = wallpaperMode === "applied" ? "allowed" : "off";
+  $("#perm-wallpaper").dataset.status = wallpaperMode === "enabled" ? "allowed" : "off";
 };
 
 function updateControlsVisibility() {
@@ -226,7 +229,6 @@ function title(text) {
 function beginPanelLoad() {
   const ticket = ++panelLoadSequence;
   if (!pet && !wallpaper) {
-    panelRenderReady = false;
     native.panelLoading(ticket);
   }
   return ticket;
@@ -239,12 +241,6 @@ function finishPanelLoad(ticket, ready) {
     native.panelFrameReady(ticket, ready);
   });
 }
-
-window.panelFramePresented = (ticket, ready) => {
-  if (ticket !== panelLoadSequence) return;
-  panelRenderReady = ready;
-  if (ready) showQueuedWallpaperSuccess();
-};
 
 async function refreshModel() {
   const ticket = beginPanelLoad();
@@ -261,7 +257,7 @@ async function refreshModel() {
       updateControlsVisibility();
       importProgress(false);
       ready = true;
-      return;
+      return true;
     }
     cancelPlayback();
     view.session = session;
@@ -287,13 +283,12 @@ async function refreshModel() {
     title(catalog.name);
     const selected = catalog.costumes.find((item) => item.id === native.costume(catalog.id || ""));
     setTab("action");
-    await selectCostume(selected || catalog.costumes[0]);
+    ready = await selectCostume(selected || catalog.costumes[0]);
     window.modelPreviewChanged?.();
     updateThirdPartyMenuButton();
     updateTouchMenuSetting();
     importProgress(false);
     petStatus(native.petShowing(), native.petVisible(), native.homeOnly());
-    ready = true;
   } catch (error) {
     importProgress(false);
     reportError(error.message);
@@ -301,7 +296,27 @@ async function refreshModel() {
   } finally {
     finishPanelLoad(ticket, ready);
   }
+  return ready;
 }
+
+window.reloadWallpaperPanel = async (request) => {
+  wallpaperPanelReloading = true;
+  armLoops();
+  let ready = false;
+  try {
+    await costumeChange?.catch(() => {});
+    ready = view.costume ? await selectCostume(view.costume) : await refreshModel();
+  } catch (error) {
+    reportError(error.message);
+    console.error(error);
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => native.wallpaperPanelReady(request, ready)));
+};
+
+window.finishWallpaperPanelReload = () => {
+  wallpaperPanelReloading = false;
+  armLoops();
+};
 
 function preview(raw, costume, file) {
   if (view.session.limited) {
@@ -537,6 +552,7 @@ function fitVisibleModel(width, height) {
   view.visibleFit = {
     model, aspect: width / height, scale: model.scale.x / width,
     x: model.position.x / width, y: model.position.y / height, top: fittedTop / height, height: fittedHeight / height,
+    width: (right - left) / touchColumns * zoom,
   };
   return { top: fittedTop, height: fittedHeight };
 }
@@ -550,26 +566,46 @@ function placeModel() {
   const scale = Math.min(width * (fitVisible ? .72 : .91) / bounds.width,
     height * (fitVisible ? .66 : .96) / bounds.height);
   view.model.scale.set(scale);
+  view.model.angle = 0;
   view.model.anchor.set(.5, fitVisible ? .5 : 1);
   view.model.position.set(width * .5, height * (fitVisible ? .5 : .985));
   if (fitVisible) fitVisibleModel(width, height);
-  if (view.sceneCharacterTransform) {
-    const { scale, x, y } = view.sceneCharacterTransform;
+  if (view.sceneCharacterTransform || desktopRotation) {
+    const { scale: zoom = 1, x = 0, y = 0, rotation = desktopRotation } = view.sceneCharacterTransform || {};
+    const radians = rotation * Math.PI / 180;
+    const cos = Math.cos(radians), sin = Math.sin(radians);
+    let adjustedZoom = zoom;
+    const fit = view.visibleFit;
+    if (pet && rotation && fit?.model === view.model) {
+      // Keep the rotated character inside the transparent pet viewport.
+      const fitWidth = fit.width * width, fitHeight = fit.height * height;
+      const rotatedWidth = Math.abs(cos) * fitWidth + Math.abs(sin) * fitHeight;
+      const rotatedHeight = Math.abs(sin) * fitWidth + Math.abs(cos) * fitHeight;
+      adjustedZoom = Math.min(zoom, width * .96 / rotatedWidth, height * .96 / rotatedHeight);
+    }
     const centerX = width / 2, centerY = height / 2;
-    view.model.scale.set(view.model.scale.x * scale);
-    view.model.position.set(centerX + width * x + (view.model.position.x - centerX) * scale,
-      centerY + height * y + (view.model.position.y - centerY) * scale);
+    const dx = view.model.position.x - centerX, dy = view.model.position.y - centerY;
+    view.model.scale.set(view.model.scale.x * adjustedZoom);
+    view.model.angle = rotation;
+    view.model.position.set(centerX + width * x + (dx * cos - dy * sin) * adjustedZoom,
+      centerY + height * y + (dx * sin + dy * cos) * adjustedZoom);
   }
   if (view.session.limited) updateThirdPartyMenuButton();
 }
 
-function setSceneCharacterTransform({ scale, x, y }) {
+function setSceneCharacterTransform({ scale, x, y, rotation = 0 }) {
   const previous = view.sceneCharacterTransform;
-  if (previous?.scale === scale && previous.x === x && previous.y === y) return;
-  view.sceneCharacterTransform = { scale, x, y };
+  if (previous?.scale === scale && previous.x === x && previous.y === y && previous.rotation === rotation) return;
+  view.sceneCharacterTransform = { scale, x, y, rotation };
   placeModel();
   if (previous?.scale !== scale) view.app?.scheduleQualitySync();
 }
+
+window.setDesktopRotation = (rotation) => {
+  if (desktopRotation === rotation) return;
+  desktopRotation = rotation;
+  placeModel();
+};
 
 function motionFades(model, metadata) {
   const manager = model.internalModel.motionManager;
@@ -605,7 +641,7 @@ async function selectCostume(costume) {
     const next = await PIXI.live2d.Live2DModel.from(metadata, { autoInteract: false, motionPreload: "NONE" });
     if (generation !== view.generation) {
       next.destroy({ children: true });
-      return;
+      return false;
     }
     view.app.prepareModel(next);
     const outgoing = view.app.stage.removeChildren();
@@ -627,6 +663,7 @@ async function selectCostume(costume) {
     updateWallpaperButton();
     scheduleWallpaperFrame();
     ready = true;
+    return true;
   } finally {
     if (generation === view.generation) {
       $("#loading").hidden = true;
@@ -688,7 +725,6 @@ function setTab(tab) {
   view.tab = tab;
   $("#filter").value = "";
   $("#filter").placeholder = "搜索" + names[tab];
-  $("#loop").disabled = tab === "expression";
   document.querySelectorAll("[data-tab]").forEach((node) =>
     node.setAttribute("aria-pressed", String(node.dataset.tab === tab)));
   $("#favorites").setAttribute("aria-pressed", String(showFavorites));
@@ -719,16 +755,73 @@ function updateLoops() {
     node.setAttribute("aria-pressed", String(loops.has(node.dataset.loop))));
 }
 
-function send(type, id = 0, kind = "") {
+function send(type, id = 0, kind = "", loop) {
   if (!view.session || view.session.limited) return;
-  native.command(JSON.stringify({ type, id, kind, role: view.session.catalog.id }));
+  const outfit = type === "action" || type === "expression" ? view.costume?.id : undefined;
+  native.command(JSON.stringify({ type, id, kind, role: view.session.catalog.id, outfit, loop }));
 }
 
-function ownsPlayback() { return wallpaper ? wallpaperVisible : pet === overlayVisible; }
+function ownsPlayback() {
+  if (pet) return overlayVisible;
+  if (wallpaper) return wallpaperPlaybackActive && !overlayVisible;
+  return panelPlaybackActive && !wallpaperPanelReloading && !document.hidden && !overlayVisible;
+}
 
-function schedule(kind, ms) {
-  clearTimeout(timers.get(kind));
-  if (ownsPlayback() && loops.has(kind)) timers.set(kind, setTimeout(() => playRandom(kind), ms));
+function updateLoopOwner() {
+  if (!ownsPlayback()) stopVoice();
+  armLoops();
+}
+
+window.setPlaybackActive = (active) => {
+  if (wallpaper) wallpaperPlaybackActive = active;
+  else panelPlaybackActive = active;
+  updateLoopOwner();
+};
+if (!pet && !wallpaper) document.addEventListener("visibilitychange", updateLoopOwner);
+
+function armLoops() {
+  clearTimeout(loopTimer);
+  if (!ownsPlayback() || loopInFlight || costumeChange || !view.model || !$("#loading").hidden || !loopDeadlines.size) return;
+  loopTimer = setTimeout(runDueLoop, Math.max(0, Math.min(...loopDeadlines.values()) - performance.now()));
+}
+
+function scheduleLoop(kind, delay = loopIntervals[kind]) {
+  if (!loops.has(kind)) return;
+  loopDeadlines.set(kind, performance.now() + delay);
+  armLoops();
+}
+
+function sendLoopStep(track, type, id, kind = "") {
+  loopDeadlines.delete(track);
+  const token = loopInFlight = loopSource + ":" + (++loopSequence);
+  send(type, id, kind, { track, token });
+}
+
+function runDueLoop() {
+  if (!ownsPlayback() || loopInFlight || costumeChange || !view.costume || !$("#loading").hidden) return;
+  const now = performance.now();
+  // Read all due deadlines together so a wardrobe change wins over coincident tracks.
+  const kind = Object.keys(loopIntervals).find((kind) => loopDeadlines.get(kind) <= now + 40);
+  if (!kind) return armLoops();
+  const catalog = view.session.catalog;
+  const costume = view.costume;
+  if (kind === "action") {
+    const data = readPerformances(catalog.id);
+    if (data.enabled) {
+      const next = nextPerformance(data);
+      if (!next) return scheduleLoop(kind, loopIntervals.expression);
+      if (next.group.tracks.voice && voiceEndsAt > now) return scheduleLoop(kind, voiceEndsAt - now + 200);
+      performanceCursor.set(next.cursor, next.group.id);
+      sendLoopStep(kind, "performance", costume.id, next.group.id);
+      return;
+    }
+  }
+  if (kind === "voice" && voiceEndsAt > now) return scheduleLoop(kind, voiceEndsAt - now + 200);
+  const choices = kind === "costume" ? catalog.costumes.filter((item) => item.id !== costume.id)
+    : performanceChoices(catalog, costume)[kind];
+  const item = choices[Math.floor(Math.random() * choices.length)];
+  if (item) sendLoopStep(kind, kind, item.id);
+  else scheduleLoop(kind);
 }
 
 function playRandom(kind, filter = () => true) {
@@ -804,6 +897,7 @@ function enableCaptionDrag(card, bounds, report = () => {}) {
 
 function stopVoice() {
   ++voiceGeneration;
+  voiceEndsAt = 0;
   if (audioNode) {
     try { audioNode.stop(); } catch {}
     audioNode = null;
@@ -845,9 +939,11 @@ async function playVoice(item) {
   node.onended = () => {
     if (audioNode !== node) return;
     stopVoice();
-    schedule("voice", 1300);
   };
   node.start();
+  const duration = buffer.duration * 1000;
+  voiceEndsAt = performance.now() + duration;
+  return duration;
 }
 
 function moveMouth(model, ids) {
@@ -870,15 +966,20 @@ function resetModelExpression() {
   manager.resetExpression();
 }
 
-function cancelPlayback() {
-  view.performancePlaying = false;
-  for (const timer of timers.values()) clearTimeout(timer);
-  timers.clear();
-  loops.clear();
+function resetActivePlayback() {
   stopVoice();
   const manager = view.model?.internalModel.motionManager;
   manager?.stopAllMotions();
   resetModelExpression();
+}
+
+function cancelPlayback() {
+  ++playbackGeneration;
+  clearTimeout(loopTimer);
+  loopInFlight = null;
+  loopDeadlines.clear();
+  loops.clear();
+  resetActivePlayback();
   updateLoops();
 }
 
@@ -909,18 +1010,28 @@ function setPerformanceEnabled(role, enabled) {
   updatePerformanceButton();
 }
 
-function sendPerformance(data) {
+function nextPerformance(data) {
   const { costume } = view;
+  if (!costume) return;
   const groups = outfitPerformances(data.groups[costume.flag]);
   if (!groups.length) return;
   const cursor = view.session.catalog.id + ":" + costume.flag;
   const last = performanceCursor.get(cursor) || data.last?.[costume.flag];
-  const chosen = groups[(groups.findIndex((group) => group.id === last) + 1) % groups.length];
-  performanceCursor.set(cursor, chosen.id);
-  send("performance", costume.id, chosen.id);
+  return { cursor, group: groups[(groups.findIndex((group) => group.id === last) + 1) % groups.length] };
 }
 
-async function playPerformance(outfit, presetId, sound) {
+function sendPerformance(data) {
+  const next = nextPerformance(data);
+  if (!next) return;
+  performanceCursor.set(next.cursor, next.group.id);
+  send("performance", view.costume.id, next.group.id);
+}
+
+function actionLoopDelay(item) {
+  return Math.max(600, (item.duration || 1) * 1000 + 600);
+}
+
+async function playPerformance(outfit, presetId, sound, automatic) {
   const { costume, model, session } = view;
   if (session.limited || costume?.id !== outfit || !model || !$("#loading").hidden) return;
   const { enabled, groups } = readPerformances(session.catalog.id);
@@ -935,46 +1046,83 @@ async function playPerformance(outfit, presetId, sound) {
     tracks[kind] = item;
   }
   if (!Object.keys(tracks).length) return;
-  cancelPlayback();
-  view.performancePlaying = true;
-  await Promise.all([
+  if (!automatic) resetActivePlayback();
+  if (tracks.expression && !tracks.expression.file) resetModelExpression();
+  const [, , voiceDuration] = await Promise.all([
     tracks.action && model.motion("page_" + tracks.action.id, 0, 3),
     tracks.expression?.file && model.expression(String(tracks.expression.id)),
     tracks.voice && sound && playVoice(tracks.voice),
   ]);
+  return Math.max(tracks.action ? actionLoopDelay(tracks.action) : 0,
+    voiceDuration ? voiceDuration + 600 : 0,
+    tracks.action || tracks.voice ? loopIntervals.action : loopIntervals.expression);
+}
+
+async function changePlaybackCostume(item, session) {
+  const previous = costumeChange || Promise.resolve();
+  const change = previous.catch(() => {}).then(async () => {
+    if (view.session !== session || view.costume?.id === item.id) return;
+    stopVoice();
+    await selectCostume(item);
+  });
+  costumeChange = change;
+  try { await change; }
+  finally { if (costumeChange === change) costumeChange = null; }
 }
 
 async function receiveCommand(command, sound) {
   if (!view.session || view.session.catalog.id !== command.role) return;
+  const session = view.session;
+  const generation = playbackGeneration;
+  const { type, id, kind, outfit, loop } = command;
+  let delay;
+  const ownStep = loop?.token === loopInFlight && Boolean(loop);
   try {
-    const { type, id, kind } = command;
+    if (loop?.token?.startsWith(loopSource + ":") && (!ownStep || !loops.has(loop.track))) return;
     if (type === "reset") return cancelPlayback();
-    if (type === "performance") return await playPerformance(id, kind, sound);
-    if (type === "loop" && ["action", "voice", "costume"].includes(kind)) {
-      if (id) { loops.add(kind); schedule(kind, 0); }
-      else { loops.delete(kind); clearTimeout(timers.get(kind)); }
+    if (type === "loop" && Object.hasOwn(loopIntervals, kind)) {
+      if (id) { loops.add(kind); scheduleLoop(kind, 250); }
+      else { loops.delete(kind); loopDeadlines.delete(kind); }
       return updateLoops();
     }
-    const item = items(type).find((entry) => entry.id === id);
-    if (!item) return;
     if (type === "costume") {
-      if (view.costume?.id !== id) {
-        if (view.performancePlaying) cancelPlayback();
-        await selectCostume(item);
-      }
-      schedule(type, 3800);
-    } else if (type === "action") {
+      const item = items(type).find((entry) => entry.id === id);
+      if (!item) return;
+      delay = loopIntervals.costume;
+      await changePlaybackCostume(item, session);
+      return;
+    }
+    while (costumeChange) await costumeChange.catch(() => {});
+    if (view.session !== session || generation !== playbackGeneration || !view.costume ||
+        (outfit !== undefined && outfit !== view.costume.id)) return;
+    if (type === "performance") {
+      const interval = await playPerformance(id, kind, sound, Boolean(loop));
+      if (loop) delay = interval;
+      return;
+    }
+    const item = (loop && type === "voice" ? performanceChoices(session.catalog, view.costume).voice
+      : items(type)).find((entry) => entry.id === id);
+    if (!item) return;
+    if (type === "action") {
+      delay = actionLoopDelay(item);
       await view.model?.motion("page_" + id, 0, 3);
-      schedule(type, Math.max(600, (item.duration || 1) * 1000 + 600));
     } else if (type === "expression") {
+      delay = loopIntervals.expression;
       if (item.file) await view.model?.expression(String(id));
       else resetModelExpression();
-    } else if (type === "voice" && sound) {
-      await playVoice(item);
+    } else if (type === "voice") {
+      delay = loopIntervals.voice;
+      if (sound) delay += (await playVoice(item)) ?? 0;
     }
   } catch (error) {
     reportError(error.message);
     console.error(error);
+  } finally {
+    if (ownStep && loopInFlight === loop.token) loopInFlight = null;
+    if (generation === playbackGeneration && view.session === session && (loop || delay !== undefined)) {
+      scheduleLoop(loop?.track ?? type, delay);
+    }
+    armLoops();
   }
 }
 
@@ -1202,29 +1350,12 @@ window.showAppPrompt = (id, title, message, action, callback, alternative) => {
   if (!appPrompt.open) appPrompt.showModal();
   syncAppModalVisibility();
 };
-function showQueuedWallpaperSuccess() {
-  if (wallpaperSuccessQueued === null || !panelRenderReady || busy || !$("#loading").hidden
-      || document.hidden || appPrompt.open) return;
-  const request = wallpaperSuccessQueued;
-  wallpaperSuccessQueued = null;
-  if (wallpaperSuccessShown === request) return;
-  wallpaperSuccessShown = request;
-  window.showAppPrompt(null, "壁纸已应用", "已设为主屏幕壁纸。", "查看桌面",
-    (viewDesktop) => native.dismissWallpaperSuccess(request, viewDesktop));
-}
-window.showWallpaperSuccess = (request) => {
-  if (wallpaperSuccessShown === request || wallpaperSuccessQueued === request) return;
-  wallpaperSuccessQueued = request;
-  showQueuedWallpaperSuccess();
-};
-document.addEventListener("visibilitychange", showQueuedWallpaperSuccess);
 appPrompt.addEventListener("close", () => {
   syncAppModalVisibility();
   const confirmed = appPrompt.returnValue === "confirm";
   if (promptCallback) promptCallback(confirmed);
   else if (Number.isInteger(promptId)) native.answerPrompt(promptId, appPrompt.returnValue);
   revealPreviewControls();
-  showQueuedWallpaperSuccess();
 });
 window.showAppNotice = (message) => {
   const notice = $("#app-notice");

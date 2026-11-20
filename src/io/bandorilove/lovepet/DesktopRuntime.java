@@ -118,6 +118,7 @@ final class DesktopRuntime {
         app.sendBroadcast(event("command").putExtra("value", value.toString()).putExtra("flag", desktopSound), PERMISSION);
     }
     static void reportPet() {
+        if (DESKTOP) PetWallpaperService.updatePetStatus();
         app.sendBroadcast(event("status").putExtra("showing", PetService.showing()).putExtra("flag", PetService.visible()), PERMISSION);
     }
 

@@ -26,6 +26,32 @@ final class WallpaperRecovery {
         photo = new AtomicFile(new File(context.getFilesDir(), "previous-wallpaper.img"));
     }
 
+    void beginExit(int wallpaperId) {
+        preferences.edit().putInt("exitWallpaperId", wallpaperId).apply();
+    }
+
+    boolean exitChangedWallpaper() {
+        if (!preferences.contains("exitWallpaperId")) return false;
+        int current = WallpaperManager.getInstance(context).getWallpaperId(WallpaperManager.FLAG_SYSTEM);
+        return current != preferences.getInt("exitWallpaperId", 0);
+    }
+
+    void cancelExit() {
+        preferences.edit().remove("exitWallpaperId").apply();
+    }
+
+    void confirmExit() {
+        preferences.edit().remove("exitWallpaperId").putBoolean("exitConfirmed", true).apply();
+    }
+
+    boolean exitConfirmationPending() {
+        return preferences.getBoolean("exitConfirmed", false);
+    }
+
+    void acknowledgeExit() {
+        preferences.edit().remove("exitConfirmed").apply();
+    }
+
     private boolean matches(int wallpaperId) {
         return preferences.contains("id") && preferences.getInt("id", 0) == wallpaperId
                 && (liveComponent() != null || hasPhoto());
