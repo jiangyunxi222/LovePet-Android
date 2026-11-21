@@ -1,0 +1,10 @@
+/build/
+/dist/
+/signing/
+*.apk
+*.apk.idsig
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.dpapi

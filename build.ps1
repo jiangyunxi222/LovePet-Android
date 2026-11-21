@@ -18,7 +18,6 @@ if ($release) {
 }
 $api = Join-Path $Sdk 'platforms/android-35/android.jar'
 $tools = Join-Path $Sdk 'build-tools/35.0.0'
-$repo = Split-Path $PSScriptRoot
 $work = Join-Path $PSScriptRoot $(if ($release) { 'build/release' } else { 'build/debug' })
 $dist = Join-Path $PSScriptRoot 'dist'
 $source = Join-Path $PSScriptRoot 'src'
@@ -28,18 +27,14 @@ $dex = Join-Path $work 'dex'
 New-Item -ItemType Directory -Force $work,$dist,$assets,$classes,$dex | Out-Null
 Copy-Item -Path (Join-Path $PSScriptRoot 'web/*') -Destination $assets -Force
 Copy-Item -Path (Join-Path $PSScriptRoot 'vendor/*') -Destination $assets -Force
-foreach ($name in @('pixi.min.js','index.min.js')) {
-    Copy-Item -LiteralPath (Join-Path $repo "panel/web/vendor/$name") -Destination (Join-Path $assets $name) -Force
-    $oldAsset = Join-Path $assets "vendor/$name"
-    if (Test-Path -LiteralPath $oldAsset -PathType Leaf) { Remove-Item -LiteralPath $oldAsset }
-}
-Copy-Item -LiteralPath (Join-Path $repo 'panel/web/favicon.svg'),(Join-Path $repo 'panel/THIRD_PARTY_NOTICES.txt') -Destination $assets -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'THIRD_PARTY_NOTICES.txt') -Destination $assets -Force
 $compiled = Join-Path $work 'resources.zip'
 $unsigned = Join-Path $work 'base.apk'
 $aligned = Join-Path $work 'aligned.apk'
 $output = Join-Path $dist $(if ($release) { 'BandoriLovePet.apk' } else { 'BandoriLovePet-debug.apk' })
 $versionName = if ($release) { '1.0.0' } else { '1.0.0-dev' }
-$debugLink = if (!$release) { @('--debug-mode') } else { @() }
+$debugLink = @()
+if (!$release) { $debugLink += '--debug-mode' }
 $env:JAVA_HOME = $Jdk
 $env:PATH = (Join-Path $Jdk 'bin') + [IO.Path]::PathSeparator + $env:PATH
 & (Join-Path $tools 'aapt2.exe') compile --dir (Join-Path $PSScriptRoot 'res') -o $compiled
