@@ -4,7 +4,9 @@
 
 [下载 LovePet 1.0.0 正式 APK](https://github.com/jiangyunxi222/BandoriLovePet/releases/tag/LovePet_Android_V1.0.0)
 
-- 手机角色包协议 v1 支持 ZIP、LPK 和 WPK，三种格式共用应用内的角色工作台。Windows 制作工具 `BandoriLovePetRoleBuilder` 中的 `PROTOCOL.md` 定义 `bandorilovepet-role` 的文件布局、命名和校验规则。应用继续兼容旧版 BandoriLove 单角色 ZIP 和第三方 LPK、WPK。创意工坊 LPK 缺少配置时，可授权其所在目录以读取 `config.json`。
+手机角色库收录 [Garupa 的 47 个单角色包](https://github.com/jiangyunxi222/GarupaLive2D-Mobile) 和 [OurNotes 的 44 个单角色包](https://github.com/jiangyunxi222/OurNotesLive2D-Mobile)。制作或转换可使用 [LovePetTool](https://github.com/jiangyunxi222/LovePetTool)。
+
+- 手机角色包协议 v1 支持 ZIP、LPK 和 WPK，三种格式共用应用内的角色工作台。Windows 制作工具 LovePetTool 使用同一份协议定义 `bandorilovepet-role` 的文件布局、命名和校验规则。应用继续兼容旧版 BandoriLove 单角色 ZIP 和第三方 LPK、WPK。创意工坊 LPK 缺少配置时，可授权其所在目录以读取 `config.json`。[手机角色包协议 v1](https://github.com/jiangyunxi222/LovePetTool/blob/main/PROTOCOL.md)
 - 普通 Cubism 3 及以上模型首次导入时会联网获取并校验 Live2D 官方运行库。经典 Cubism 2 模型需要从含运行库的 BandoriLove 角色包初始化。完整角色包带动作、表情、衣装、语音和字幕。
 - 点「显示桌宠」并授予浮窗权限，即可拖动角色、双指缩放。完整角色包用腿部触控区打开菜单，第三方 LPK、WPK 支持可识别的包内触控。「关闭菜单」只收起菜单。可在控制台或桌宠菜单退出桌宠。
 - 在应用内「设置」可选择「浮于应用上层」或「在主屏幕显示」。后者需要系统的使用情况访问权限，打开其他应用时隐藏桌宠，回到主屏幕后恢复。
