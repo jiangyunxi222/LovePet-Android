@@ -32,6 +32,8 @@ final class PetWeb {
     private final WallpaperMedia.Writer mediaWriter;
     private final WallpaperTilt tilt;
     private volatile boolean wallpaperMode;
+    private volatile boolean wallpaperPreview;
+    private String lastModelState;
     private boolean wallpaperShown;
     private boolean pageReady;
     private boolean tiltShowing;
@@ -81,6 +83,7 @@ final class PetWeb {
             }
             @Override public boolean onRenderProcessGone(WebView window, RenderProcessGoneDetail detail) {
                 Log.e("BandoriLovePet", "WebView renderer exited (crash: " + detail.didCrash() + ")");
+                RuntimeDiagnostics.event(context, renderArea(), detail.didCrash() ? "WebView 渲染进程崩溃" : "WebView 渲染进程退出");
                 rendererGone.run();
                 return true;
             }
@@ -100,6 +103,33 @@ final class PetWeb {
         });
         view.addJavascriptInterface(new Object() {
             @JavascriptInterface public void pickModel() { if (!desktop) main.post(pick); }
+            @JavascriptInterface public String runtimeDiagnostics() {
+                return context instanceof MainActivity ? RuntimeDiagnostics.report((MainActivity) context) : "";
+            }
+            @JavascriptInterface public void reportModelRendering(String state) {
+                String message;
+                switch (state) {
+                    case "ready": message = "Live2D 模型已渲染"; break;
+                    case "empty": message = "暂无模型"; break;
+                    case "error": message = "Live2D 模型加载失败"; break;
+                    default: return;
+                }
+                if (state.equals(lastModelState)) return;
+                lastModelState = state;
+                RuntimeDiagnostics.event(context, renderArea(), message);
+            }
+            @JavascriptInterface public void reportRuntimeFailure(String feature) {
+                switch (feature) {
+                    case "action":
+                    case "viewer-action": RuntimeDiagnostics.event(context, RuntimeDiagnostics.Area.PLAYBACK_ERROR, "动作或互动播放失败"); break;
+                    case "expression": RuntimeDiagnostics.event(context, RuntimeDiagnostics.Area.PLAYBACK_ERROR, "表情播放失败"); break;
+                    case "voice": RuntimeDiagnostics.event(context, RuntimeDiagnostics.Area.PLAYBACK_ERROR, "语音播放失败"); break;
+                    case "performance": RuntimeDiagnostics.event(context, RuntimeDiagnostics.Area.PLAYBACK_ERROR, "演出播放失败"); break;
+                    case "scene": RuntimeDiagnostics.event(context, RuntimeDiagnostics.Area.SCENE_ERROR, "素材加载、播放或保存失败"); break;
+                    case "scene-publish": RuntimeDiagnostics.event(context, RuntimeDiagnostics.Area.SCENE_ERROR, "壁纸素材与图层同步失败"); break;
+                    default: break;
+                }
+            }
             @JavascriptInterface public void togglePet() { main.post(toggle); }
             @JavascriptInterface public void openPanel() { if (desktop) main.post(openPanel); }
             @JavascriptInterface public void changeWallpaper(boolean exit) {
@@ -281,17 +311,27 @@ final class PetWeb {
         return touchShape.hitsControls(x / view.getWidth(), y / view.getHeight());
     }
     void load() { view.loadUrl(HOME + (desktop ? "?pet=1" : "")); }
-    void loadWallpaper() {
+    void loadWallpaper(boolean preview) {
+        wallpaperPreview = preview;
         wallpaperMode = true;
         view.loadUrl(HOME + "?wallpaper=1");
+    }
+    private RuntimeDiagnostics.Area renderArea() {
+        if (desktop) return RuntimeDiagnostics.Area.PET_RENDER;
+        if (!wallpaperMode) return RuntimeDiagnostics.Area.PANEL_RENDER;
+        return wallpaperPreview ? RuntimeDiagnostics.Area.WALLPAPER_PREVIEW : RuntimeDiagnostics.Area.WALLPAPER_RENDER;
     }
     void onChangeWallpaper(Consumer<Boolean> action) { changeWallpaper = action; }
     void onWallpaperFrameReady(Runnable action) { wallpaperFrameReady = action; }
     void setPaused(boolean paused) {
         this.paused = paused;
-        if (paused) view.onPause();
-        else view.onResume();
-        setPlaybackActive(!paused);
+        if (paused) {
+            setPlaybackActive(false);
+            view.onPause();
+        } else {
+            view.onResume();
+            setPlaybackActive(true);
+        }
         updateWallpaperTilt();
     }
     void setPlaybackActive(boolean active) {
@@ -336,7 +376,7 @@ final class PetWeb {
     }
     void closeSettings() {
         evaluate("(document.querySelector('#app-prompt[open]') || document.querySelector('#performance-options[open]')"
-                + " || document.querySelector('#permission-config[open], #app-library[open], #performance-settings[open]')"
+                + " || document.querySelector('#permission-config[open], #runtime-diagnostics[open], #app-library[open], #performance-settings[open]')"
                 + " || document.querySelector('#settings')).close()");
     }
     void modelLibraryResult(int request, String error) {
@@ -359,6 +399,9 @@ final class PetWeb {
     boolean isPageReady() { return pageReady; }
     void wallpaperStatus(boolean applied, boolean changing) {
         evaluate("window.setHomeWallpaperState?.(" + applied + "," + changing + ")");
+    }
+    void runWallpaperTileAction(boolean exit) {
+        evaluate("window.runWallpaperTileAction?.(" + exit + ")");
     }
     void panelInsets(Insets insets) {
         float density = view.getResources().getDisplayMetrics().density;

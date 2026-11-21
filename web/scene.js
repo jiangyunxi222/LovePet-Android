@@ -5,19 +5,20 @@
   const key = "wallpaper-scene-v1";
   const materialPlacement = { scale: 1, x: 0, y: 0, rotation: 0 };
   const characterPlacement = { ...materialPlacement, scale: .82, y: -.04 };
+  const starOpacity = .65;
   const base = () => ({ id: "background", kind: "background", name: "默认背景", color: "default", opacity: 1, visible: true, ...materialPlacement });
   const isBase = layer => layer.id === "background";
   const defaults = () => [
     base(),
     { id: "character", kind: "character", name: "Live2D 角色", opacity: 1, visible: true, ...characterPlacement },
-    { id: "sparkles", kind: "effect", name: "星光", effect: "stars", opacity: .65, visible: true, ...materialPlacement },
+    { id: "sparkles", kind: "effect", name: "星光", effect: "stars", opacity: starOpacity, visible: true, ...materialPlacement },
   ];
   function wrapRotation(value) {
     const angle = value % 360;
     return angle > 180 ? angle - 360 : angle < -180 ? angle + 360 : angle || 0;
   }
   const palettes = {
-    default: ["原色", "radial-gradient(ellipse at 50% 82%,#eee0eb,#fbf5f9 75%)"],
+    default: ["原色", "var(--scene-background)"],
     dusk: ["暮色", "radial-gradient(ellipse at 16% 13%,#d3abce 0%,transparent 58%),linear-gradient(160deg,#4b456d,#916786 58%,#f1c5be)"],
     rose: ["樱色", "radial-gradient(ellipse at 70% 10%,#fff7e7,transparent 60%),linear-gradient(155deg,#f5d6e6,#f6e9f2 48%,#dcbbdb)"],
     night: ["夜空", "radial-gradient(ellipse at 85% 8%,#56517f,transparent 60%),linear-gradient(170deg,#171d3e,#3f355e 63%,#966683)"],
@@ -121,9 +122,13 @@
     $("#scene-message").textContent = text;
     $("#scene-message").hidden = !text;
   }
+  function sceneFailure(text) {
+    if ($("#scene-message").textContent !== text) native.reportRuntimeFailure?.("scene");
+    message(text);
+  }
   function save() {
     try { localStorage.setItem(key, JSON.stringify(layers)); }
-    catch { message("场景保存失败，请检查可用存储空间。"); return false; }
+    catch { sceneFailure("场景保存失败，请检查可用存储空间。"); return false; }
     window.dispatchEvent(new Event("wallpaper-scene-saved"));
     clearTimeout(publishTimer);
     publishTimer = setTimeout(() => publishScene().catch(console.error), 150);
@@ -157,14 +162,17 @@
       if (native.desktopSetting(key) === encoded) return;
       for (const layer of scene) if (layer.media) await copyMedia(layer.media);
       if (encoded === JSON.stringify(layers) && !native.setDesktopSetting(key, encoded)) throw new Error("壁纸场景保存失败，请检查可用空间。");
+    }).catch(error => {
+      native.reportRuntimeFailure?.("scene-publish");
+      throw error;
     });
     return publishing;
   }
-  function applyNode(layer, node, index) {
+  function applyNode(layer, node, index, panelPreview = false) {
     node.style.zIndex = index + 1;
-    node.style.opacity = layer.visible ? layer.opacity : 0;
+    node.style.opacity = panelPreview && layer.kind === "character" ? 1 : layer.visible ? layer.opacity : 0;
     if (layer.kind === "character") {
-      node.style.pointerEvents = layer.visible && layer.opacity > 0 ? "auto" : "none";
+      node.style.pointerEvents = panelPreview || (layer.visible && layer.opacity > 0) ? "auto" : "none";
       setSceneCharacterTransform(layer);
       return;
     }
@@ -266,7 +274,11 @@
       if (nodes.get(layer.id) !== node) { effect?.destroy(); return; }
       effects.set(layer.id, effect);
       syncEffect(layers.find(item => item.id === layer.id));
-    } catch (error) { console.error("Particle layer failed", error); message("特效加载失败，请重新打开应用。"); }
+    } catch (error) {
+      if (nodes.get(layer.id) !== node) return;
+      console.error("Particle layer failed", error);
+      sceneFailure("特效加载失败，请重新打开应用。");
+    }
   }
   function render() {
     const alive = new Set(layers.map(layer => layer.id));
@@ -277,24 +289,42 @@
       node.remove(); nodes.delete(id);
       if (urls.has(id)) { URL.revokeObjectURL(urls.get(id)); urls.delete(id); }
     }
-    layers.forEach((layer, index) => {
-      if (layer.kind === "character") { applyNode(layer, $("#canvas"), index); return; }
+    const panelPreview = !wallpaper && !document.documentElement.classList.contains("immersive-preview");
+    // Keep scene materials behind the character on the model panel.
+    const drawOrder = panelPreview ? [
+      ...layers.filter(layer => layer.kind !== "character" && layer.kind !== "effect"),
+      ...layers.filter(layer => layer.kind === "character" || layer.kind === "effect"),
+    ] : layers;
+    drawOrder.forEach((layer, index) => {
+      if (layer.kind === "character") { applyNode(layer, $("#canvas"), index, panelPreview); return; }
       let node = nodes.get(layer.id);
       if (!node) {
         node = document.createElement(layer.kind === "video" ? "video" : layer.kind === "image" ? "img" : "div");
         node.className = "scene-layer";
         nodes.set(layer.id, node);
         host.append(node);
-        if (layer.kind === "effect") { node.id = "particles-" + layer.id; makeParticles(node, layer); }
+        if (layer.kind === "effect") {
+          node.id = "particles-" + layer.id;
+          makeParticles(node, layer);
+        }
         if (layer.kind === "video") {
           node.muted = true; node.loop = true; node.playsInline = true;
         }
-        if (layer.media) media(layer.media).then(blob => {
-          if (!blob || nodes.get(layer.id) !== node) return;
-          const url = URL.createObjectURL(blob);
-          urls.set(layer.id, url); node.src = url;
-          if (layer.kind === "video" && visible && layer.visible) node.play().catch(() => message("此视频格式暂时无法播放。"));
-        }).catch(() => message("图片或视频读取失败，请重新添加。"));
+        if (layer.media) {
+          const unavailable = () => {
+            if (nodes.get(layer.id) === node) sceneFailure("图片或视频读取失败，请重新添加。");
+          };
+          node.onerror = unavailable;
+          media(layer.media).then(blob => {
+            if (!blob) return unavailable();
+            if (nodes.get(layer.id) !== node) return;
+            const url = URL.createObjectURL(blob);
+            urls.set(layer.id, url); node.src = url;
+            if (layer.kind === "video" && visible && layer.visible) node.play().catch(() => {
+              if (nodes.get(layer.id) === node && node.error) sceneFailure("此视频格式暂时无法播放。");
+            });
+          }).catch(unavailable);
+        }
       }
       if (layer.kind === "background") node.style.background = palettes[layer.color]?.[1] || palettes.default[1];
       applyNode(layer, node, index);
@@ -306,6 +336,7 @@
     });
   }
   function setVisible(show) {
+    if (visible === show) return;
     visible = show;
     render();
   }
@@ -374,12 +405,30 @@
   }
   $("#edit-scene").onclick = openEditor;
   if (!wallpaper) {
+    const opacity = $("#scene-panel-opacity");
+    const opacityValue = $("#scene-panel-opacity-value");
+    const editor = $("#scene-editor");
+    const transparencyKey = "wallpaper-editor-transparency";
+    try {
+      const savedTransparency = Number(localStorage.getItem(transparencyKey));
+      if (Number.isFinite(savedTransparency)) opacity.value = 100 - savedTransparency;
+    } catch { /* The editor also works without saved preferences. */ }
+    function updatePanelOpacity() {
+      editor.style.setProperty("--scene-panel-fill", opacity.valueAsNumber / 100);
+      opacityValue.value = opacity.value + "%";
+    }
+    opacity.oninput = updatePanelOpacity;
+    opacity.onchange = () => {
+      try { localStorage.setItem(transparencyKey, 100 - opacity.valueAsNumber); }
+      catch { /* Keep the current value for this session. */ }
+    };
+    updatePanelOpacity();
     tiltToggle.disabled = !native.hasWallpaperTilt();
     tiltToggle.checked = !tiltToggle.disabled && native.wallpaperTiltEnabled();
     tiltToggle.onchange = () => {
       if (!native.setWallpaperTiltEnabled(tiltToggle.checked)) {
         tiltToggle.checked = native.wallpaperTiltEnabled();
-        message("无法保存背景微动设置。");
+        sceneFailure("无法保存背景微动设置。");
       }
     };
   }
@@ -398,7 +447,6 @@
     if (!on) showPetMenu(false);
     updateTiltPreview();
   };
-  $("#scene-wallpaper-settings").onclick = () => native.openPermission("wallpaper");
   for (const name of ["opacity", "scale", "x", "y", "rotation"]) {
     $("#scene-" + name).oninput = (event) => {
       if (isBase(current())) return;
@@ -410,7 +458,8 @@
   function addEffect(effect, name) {
     if (layers.length >= 12) return message("最多可放置 12 个图层。");
     if (layers.filter(layer => layer.kind === "effect").length >= 3) return message("最多同时使用 3 层特效，减少发热与耗电。");
-    const layer = { id: identifier(), kind: "effect", effect, name, opacity: .8, visible: true, ...materialPlacement };
+    const layer = { id: identifier(), kind: "effect", effect, name, opacity: effect === "stars" ? starOpacity : .8,
+      visible: true, ...materialPlacement };
     layers.push(layer);
     selected = layer.id; $("#scene-choices").hidden = true; update(); message();
   }
@@ -601,7 +650,7 @@
       selected = id; update(); message();
     } catch (error) {
       console.error("Scene media import failed", error);
-      message("素材读取或保存失败，请重新选择文件。");
+      sceneFailure("素材读取或保存失败，请重新选择文件。");
     }
   }
   async function changeWallpaper(exit, fromEditor = false) {
@@ -620,8 +669,11 @@
     }
   }
   $("#apply-wallpaper").onclick = () => changeWallpaper(wallpaperApplied);
-  $("#welcome-wallpaper").onclick = () => changeWallpaper(true);
+  $("#welcome-wallpaper").onclick = () => {
+    if (wallpaperApplied) changeWallpaper(true);
+  };
   $("#scene-apply").onclick = () => changeWallpaper(false, true);
+  window.runWallpaperTileAction = exit => changeWallpaper(exit, !$("#scene-editor").hidden);
   window.addEventListener("storage", event => {
     if (event.key !== key || !event.newValue) return;
     try {
@@ -632,11 +684,11 @@
     } catch {}
   });
   document.addEventListener("visibilitychange", () => {
-    setVisible(!document.hidden && (!wallpaper || wallpaperVisible));
+    setVisible(!document.hidden && (wallpaper ? wallpaperVisible : panelPlaybackActive));
     updateTiltPreview();
   });
   window.sceneLayers = {
-    setVisible, get layers() { return JSON.parse(JSON.stringify(layers)); }, open: openEditor,
+    render, setVisible, get layers() { return JSON.parse(JSON.stringify(layers)); }, open: openEditor,
     ignoreGestureClick: (event) => suppressClick && event.detail > 0,
     setTiltActive, shiftBackground, updateTiltPreview,
     mediaReady: () => layers.every(layer => {

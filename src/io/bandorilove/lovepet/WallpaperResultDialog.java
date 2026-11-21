@@ -88,7 +88,7 @@ final class WallpaperResultDialog extends Dialog {
     }
 
     private RippleDrawable button(int fill, int line) {
-        return new RippleDrawable(ColorStateList.valueOf(0x2233192f), rounded(fill, line, 999), null);
+        return new RippleDrawable(ColorStateList.valueOf(0x22000000), rounded(fill, line, 999), null);
     }
 
     private int dp(int size) {

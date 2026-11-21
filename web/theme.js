@@ -15,7 +15,7 @@
   }
 
   function apply(id) {
-    const [selected, name, accent, tint] = themes.find(theme => theme[0] === id) || themes[0];
+    const [selected, name, accent, tint, highlight = accent] = themes.find(theme => theme[0] === id) || themes[0];
     root.dataset.theme = selected;
     root.style.setProperty("--theme-accent", accent);
     root.style.setProperty("--theme-tint", tint);
@@ -25,6 +25,12 @@
     root.style.setProperty("--theme-surface", mix(tint, .22, "#ffffff"));
     root.style.setProperty("--theme-wash", mix(tint, .44, "#ffffff"));
     root.style.setProperty("--theme-active", mix(accent, .24, "#ffffff"));
+    const light = mix(highlight, .12, "#ffffff");
+    const depth = mix(accent, .17, tint);
+    root.style.setProperty("--scene-background",
+      `radial-gradient(ellipse at 77% 8%, ${light}, transparent 62%), ` +
+      `radial-gradient(ellipse at 37% 96%, ${depth}, transparent 72%), ` +
+      `linear-gradient(155deg, ${mix(tint, .55, "#ffffff")}, ${mix(tint, .85, light)})`);
     current.textContent = name;
     for (const button of grid.children) button.setAttribute("aria-pressed", String(button.dataset.theme === selected));
   }

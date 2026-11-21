@@ -101,6 +101,7 @@ final class DesktopRuntime {
                     remoteShowing = intent.getBooleanExtra("showing", false);
                     remoteVisible = intent.getBooleanExtra("flag", false);
                     MainActivity.petChanged();
+                    DesktopTile.Pet.onPetStateChanged(remoteShowing);
                 }
                 break;
             default:
@@ -123,11 +124,15 @@ final class DesktopRuntime {
     }
 
     static void queryPet() {
-        ActivityManager manager = app.getSystemService(ActivityManager.class);
-        remoteShowing = manager.getRunningServices(Integer.MAX_VALUE).stream()
-                .anyMatch(service -> service.service.getClassName().equals(PetService.class.getName()));
+        remoteShowing = isPetRunning(app);
         if (!remoteShowing) remoteVisible = false;
         signal("query");
+    }
+
+    static boolean isPetRunning(Context context) {
+        ActivityManager manager = context.getSystemService(ActivityManager.class);
+        return manager.getRunningServices(Integer.MAX_VALUE).stream()
+                .anyMatch(service -> service.service.getClassName().equals(PetService.class.getName()));
     }
 
     static boolean petShowing() { return DESKTOP ? PetService.showing() : remoteShowing; }

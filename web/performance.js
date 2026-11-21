@@ -2,6 +2,10 @@
 
 const performanceTracks = ["action", "expression", "voice"];
 
+function matchesItemFlag(item, flag) {
+  return item.flag === flag || item.aliasFlags?.includes(flag);
+}
+
 function performanceChoices(catalog, costume) {
   return {
     action: costume.actions || [],
@@ -16,6 +20,18 @@ function outfitPerformances(value) {
     return [{ id: "first", name: "演出 1", tracks: value }];
   }
   return [];
+}
+
+function mergeOutfitPerformances(groups, costumes) {
+  for (const costume of costumes) {
+    for (const alias of costume.aliasFlags || []) {
+      if (!Object.hasOwn(groups, alias)) continue;
+      const saved = outfitPerformances(groups[costume.flag]);
+      const previous = outfitPerformances(groups[alias]).map(group => ({ ...group, id: alias + "-" + group.id }));
+      groups[costume.flag] = [...saved, ...previous];
+      delete groups[alias];
+    }
+  }
 }
 
 function updateOutfitPerformances(groups, outfit, id, group) {
@@ -151,11 +167,10 @@ function createPerformanceEditor({ read, save, setEnabled, onVisibility = () => 
     for (const kind of performanceTracks) {
       const field = form.elements[kind];
       fill(field, choices[kind], "不指定");
-      field.value = saved?.tracks[kind] || "";
-      if (field.selectedIndex < 0) {
-        field.value = "";
-        missing = true;
-      }
+      const savedFlag = saved?.tracks[kind];
+      const item = savedFlag && choices[kind].find(entry => matchesItemFlag(entry, savedFlag));
+      field.value = item?.flag || "";
+      if (savedFlag && !item) missing = true;
     }
     status.textContent = missing ? "部分素材已变更，请更新这套演出。" : "";
     syncChoices();

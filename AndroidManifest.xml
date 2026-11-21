@@ -29,7 +29,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <permission android:name="io.bandorilove.lovepet.permission.DESKTOP_RUNTIME" android:protectionLevel="signature" />
     <uses-permission android:name="io.bandorilove.lovepet.permission.DESKTOP_RUNTIME" />
-    <application android:label="BandoriLovePet" android:icon="@drawable/pet_icon"
+    <application android:label="@string/app_name" android:icon="@drawable/pet_icon"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false" android:hardwareAccelerated="true">
         <activity android:name=".MainActivity" android:exported="true"
@@ -43,11 +43,28 @@
         <activity android:name=".WallpaperSettingsActivity" android:exported="true"
             android:theme="@style/WallpaperSettingsTheme"
             android:label="@string/wallpaper_settings" android:icon="@drawable/wallpaper_settings_icon" />
-        <service android:name=".PetService" android:exported="false" android:process=":desktop" android:foregroundServiceType="specialUse">
+        <service android:name=".PetService" android:exported="false" android:process=":desktop"
+            android:foregroundServiceType="specialUse" android:stopWithTask="false">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-enabled interactive Live2D desktop pet overlay" />
         </service>
-        <service android:name=".PetWallpaperService" android:label="@string/wallpaper_label"
+        <service android:name=".DesktopTile$Pet" android:exported="true" android:label="@string/qs_pet"
+            android:icon="@drawable/ic_qs_pet" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
+        </service>
+        <service android:name=".DesktopTile$Wallpaper" android:exported="true" android:label="@string/qs_wallpaper"
+            android:icon="@drawable/ic_qs_wallpaper" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
+        </service>
+        <activity android:name=".DesktopTile$PanelActionActivity" android:exported="false"
+            android:theme="@android:style/Theme.NoDisplay" />
+        <service android:name=".PetWallpaperService" android:label="@string/app_name"
             android:icon="@drawable/pet_wallpaper_thumbnail" android:process=":desktop"
             android:permission="android.permission.BIND_WALLPAPER" android:exported="true">
             <intent-filter>

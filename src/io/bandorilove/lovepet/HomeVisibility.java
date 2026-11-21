@@ -28,24 +28,28 @@ final class HomeVisibility implements AutoCloseable {
     private final HandlerThread thread = new HandlerThread("pet-home-visibility");
     private final Handler worker;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable pollVisibility = this::poll;
     private final Set<ComponentName> resumed = new HashSet<>();
     private final Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+    private final ComponentName panel;
     private final PowerManager power;
     private final KeyguardManager keyguard;
     private final UsageStatsManager usage;
     private long lastQuery;
+    private long panelRemovedAt;
     private boolean shown;
     private volatile boolean closed;
 
     HomeVisibility(Context context, Consumer<Boolean> onChange) {
         this.context = context;
         this.onChange = onChange;
+        panel = new ComponentName(context, MainActivity.class);
         power = context.getSystemService(PowerManager.class);
         keyguard = context.getSystemService(KeyguardManager.class);
         usage = context.getSystemService(UsageStatsManager.class);
         thread.start();
         worker = new Handler(thread.getLooper());
-        worker.post(this::poll);
+        worker.post(pollVisibility);
     }
 
     static boolean hasUsageAccess(Context context) {
@@ -69,7 +73,18 @@ final class HomeVisibility implements AutoCloseable {
             boolean visible = show;
             main.post(() -> { if (!closed) onChange.accept(visible); });
         }
-        worker.postDelayed(this::poll, POLL_INTERVAL_MS);
+        worker.postDelayed(pollVisibility, POLL_INTERVAL_MS);
+    }
+
+    void panelTaskRemoved() {
+        long removedAt = System.currentTimeMillis();
+        worker.post(() -> {
+            if (closed) return;
+            panelRemovedAt = removedAt;
+            resumed.remove(panel);
+            worker.removeCallbacks(pollVisibility);
+            poll();
+        });
     }
 
     private boolean isHomeVisible() {
@@ -79,6 +94,7 @@ final class HomeVisibility implements AutoCloseable {
             return false;
         }
         long now = System.currentTimeMillis();
+        if (panelRemovedAt > now) panelRemovedAt = 0;
         if (lastQuery > now) {
             resumed.clear();
             lastQuery = 0;
@@ -98,6 +114,7 @@ final class HomeVisibility implements AutoCloseable {
             boolean background = type == UsageEvents.Event.ACTIVITY_PAUSED || type == UsageEvents.Event.ACTIVITY_STOPPED;
             if (!(foreground || background) || event.getPackageName() == null || event.getClassName() == null) continue;
             ComponentName activity = new ComponentName(event.getPackageName(), event.getClassName());
+            if (activity.equals(panel) && event.getTimeStamp() <= panelRemovedAt) continue;
             if (foreground) resumed.add(activity);
             else resumed.remove(activity);
         }

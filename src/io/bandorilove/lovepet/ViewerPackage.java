@@ -30,7 +30,15 @@ final class ViewerPackage {
     }
 
     static JSONObject load(ModelStore.ZipSource source, File output, String extension) throws Exception {
-        if (extension.equals("lpk")) return loadLpk(source, output, null);
+        return load(source, output, extension, ViewerPackage::loadLpk);
+    }
+
+    interface LpkLoader {
+        JSONObject load(ModelStore.ZipSource source, File output, JSONObject workshop) throws Exception;
+    }
+
+    static JSONObject load(ModelStore.ZipSource source, File output, String extension, LpkLoader loader) throws Exception {
+        if (extension.equals("lpk")) return loader.load(source, output, null);
         String index = "config.json";
         if (!source.has(index)) {
             List<String> matches = new ArrayList<>();
@@ -48,7 +56,7 @@ final class ViewerPackage {
                 ModelStore.copy(packed, embedded, ModelStore.MAX_BYTES, null);
             }
             try (ModelStore.ZipSource lpk = new ModelStore.ZipSource(embedded)) {
-                return loadLpk(lpk, output, config);
+                return loader.load(lpk, output, config);
             }
         } finally {
             embedded.delete();

@@ -24,13 +24,13 @@
                 android:src="@drawable/pet_icon" />
 
             <TextView
+                android:id="@+id/wallpaper_dialog_title"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:accessibilityHeading="true"
                 android:fontFamily="sans-serif-medium"
                 android:text="@string/wallpaper_settings"
-                android:textColor="@color/wallpaper_dialog_ink"
                 android:textSize="22sp" />
         </LinearLayout>
 
@@ -41,7 +41,6 @@
             android:layout_marginTop="14dp"
             android:accessibilityLiveRegion="polite"
             android:lineSpacingMultiplier="1.35"
-            android:textColor="@color/wallpaper_dialog_ink"
             android:textSize="15sp" />
 
         <Button

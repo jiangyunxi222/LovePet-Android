@@ -1,13 +1,13 @@
-# BandoriLovePet for Android
+# LovePet for Android
 
 适用于 Android 11 及以上版本，使用系统提供的 Android System WebView。
 
-- ZIP 仅支持 BandoriLove 单角色发行包。第三方模型可选择 LPK 或 WPK。创意工坊 LPK 缺少配置时，可授权其所在目录以读取 `config.json`。
+- 手机角色包协议 v1 支持 ZIP、LPK 和 WPK，三种格式共用应用内的角色工作台。Windows 制作工具 `BandoriLovePetRoleBuilder` 中的 `PROTOCOL.md` 定义 `bandorilovepet-role` 的文件布局、命名和校验规则。应用继续兼容旧版 BandoriLove 单角色 ZIP 和第三方 LPK、WPK。创意工坊 LPK 缺少配置时，可授权其所在目录以读取 `config.json`。
 - 普通 Cubism 3 及以上模型首次导入时会联网获取并校验 Live2D 官方运行库。经典 Cubism 2 模型需要从含运行库的 BandoriLove 角色包初始化。完整角色包带动作、表情、衣装、语音和字幕。
 - 点「显示桌宠」并授予浮窗权限，即可拖动角色、双指缩放。完整角色包用腿部触控区打开菜单，第三方 LPK、WPK 支持可识别的包内触控。「关闭菜单」只收起菜单。可在控制台或桌宠菜单退出桌宠。
 - 在应用内「设置」可选择「浮于应用上层」或「在主屏幕显示」。后者需要系统的使用情况访问权限，打开其他应用时隐藏桌宠，回到主屏幕后恢复。
 - 「设置 → 权限配置」可查看悬浮窗、使用情况访问和动态壁纸的状态，返回应用后自动更新。动态壁纸通过系统确认。如果系统确认后仍显示旧壁纸，可从这里打开应用信息，检查系统是否提供「动态壁纸服务」权限。
-- 双击角色预览的空白背景，在角色控制和全屏纯享之间切换。也可以在「设置」开关「角色控制」。
+- 双击角色预览的空白背景，在角色控制和全屏纯享之间切换。
 - 「触控菜单」在角色发行包中默认开启。第三方模型默认关闭，开启后点右下角「⋯」即可打开。
 - 「设置 → 主题配色」提供 12 套主题，可调整软件的按钮、卡片和设置界面。
 - 「互动收藏」将角色触控触发的动作、表情、换装和语音限制在收藏内容内。
@@ -40,6 +40,6 @@ adb install -r android/dist/BandoriLovePet-debug.apk
 pwsh -File android/build.ps1 -ReleaseKeystore 'D:\signing\release.p12' -SigningLineage 'D:\signing\lineage.bin'
 ```
 
-正式包输出到 `android/dist/BandoriLovePet.apk`。当前版本为 1.0.3，内部版本号为 11，应用 ID 为 `io.bandorilove.lovepet`，沿用正式密钥和签名轮换证明。使用旧应用 ID 的版本仍独立安装。
+正式包输出到 `android/dist/BandoriLovePet.apk`。LovePet 的显示版本为 1.0.0，Android 内部版本号为 12。应用 ID 为 `io.bandorilove.lovepet`，签名轮换证明用于已有安装的覆盖升级。
 
 tsParticles 使用 MIT 许可证，完整声明位于 `android/vendor/tsparticles-LICENSE.txt`，依赖来源与校验值位于 `android/vendor/tsparticles-sources.json`，均随 APK 一并打包。

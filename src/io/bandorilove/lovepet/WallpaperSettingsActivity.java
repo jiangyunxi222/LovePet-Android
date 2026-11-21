@@ -61,16 +61,19 @@ public final class WallpaperSettingsActivity extends Activity {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dialog.setContentView(R.layout.wallpaper_settings_dialog);
         dialog.setTitle(R.string.wallpaper_settings);
-        dialog.findViewById(R.id.wallpaper_dialog_card).setBackground(
-                rounded(R.color.wallpaper_dialog_surface, R.color.wallpaper_dialog_line, 26));
+        AppTheme colors = new AppTheme(this);
+        dialog.findViewById(R.id.wallpaper_dialog_card).setBackground(rounded(colors.surface, colors.line, 26));
+        TextView title = dialog.findViewById(R.id.wallpaper_dialog_title);
+        title.setTextColor(colors.ink);
         TextView body = dialog.findViewById(R.id.wallpaper_dialog_message);
+        body.setTextColor(colors.ink);
         body.setText(message);
         Button picker = dialog.findViewById(R.id.wallpaper_dialog_picker);
         Button appInfo = dialog.findViewById(R.id.wallpaper_dialog_app_info);
         Button cancel = dialog.findViewById(R.id.wallpaper_dialog_cancel);
-        styleButton(picker, true);
-        styleButton(appInfo, false);
-        styleButton(cancel, false);
+        styleButton(picker, colors, true);
+        styleButton(appInfo, colors, false);
+        styleButton(cancel, colors, false);
         dialog.setOnDismissListener(ignored -> {
             if (!isChangingConfigurations()) finish();
         });
@@ -97,17 +100,17 @@ public final class WallpaperSettingsActivity extends Activity {
         window.setLayout(Math.min(width - dp(32), dp(436)), WindowManager.LayoutParams.WRAP_CONTENT);
     }
 
-    private void styleButton(Button button, boolean primary) {
-        int color = primary ? R.color.wallpaper_dialog_accent : R.color.wallpaper_dialog_surface;
-        int border = primary ? R.color.wallpaper_dialog_accent : R.color.wallpaper_dialog_line;
-        button.setTextColor(primary ? Color.WHITE : getColor(R.color.wallpaper_dialog_ink));
-        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22432C42), rounded(color, border, 24), null));
+    private void styleButton(Button button, AppTheme colors, boolean primary) {
+        int fill = primary ? colors.accent : colors.surface;
+        int border = primary ? colors.accent : colors.line;
+        button.setTextColor(primary ? Color.WHITE : colors.ink);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22000000), rounded(fill, border, 24), null));
     }
 
     private GradientDrawable rounded(int fill, int border, int radius) {
         GradientDrawable shape = new GradientDrawable();
-        shape.setColor(getColor(fill));
-        shape.setStroke(dp(1), getColor(border));
+        shape.setColor(fill);
+        shape.setStroke(dp(1), border);
         shape.setCornerRadius(dp(radius));
         return shape;
     }

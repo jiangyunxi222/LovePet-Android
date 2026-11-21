@@ -4,6 +4,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
@@ -18,8 +19,10 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.*;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 
 import org.json.JSONObject;
@@ -29,6 +32,8 @@ public final class PetService extends Service {
     private static final String STOP = "io.bandorilove.lovepet.STOP_PET";
     private static final String HOME_ONLY = "homeOnly";
     private static final long CROP_SETTLE_DELAY_MS = 500;
+    private static final long SHOW_FADE_MS = 150;
+    private static final long RENDERER_RECOVERY_INTERVAL_MS = 15_000;
     private static final int OVERLAY_FLAGS = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
             | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
@@ -72,6 +77,9 @@ public final class PetService extends Service {
     private boolean wantedVisible;
     private boolean settingsOpen;
     private volatile boolean visible;
+    private long nextRendererRecoveryAt;
+    private boolean rendererRecovering;
+    private String stopEvent = "服务收到停止回调";
 
     static boolean showing() { return active != null; }
     static boolean visible() {
@@ -107,6 +115,7 @@ public final class PetService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         if ((intent != null && STOP.equals(intent.getAction())) || !Settings.canDrawOverlays(this)
                 || new ModelStore(this).active() == null) {
+            stopEvent = intent != null && STOP.equals(intent.getAction()) ? "用户关闭桌宠" : "悬浮窗权限或当前模型不可用";
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -114,11 +123,23 @@ public final class PetService extends Service {
         startForeground(42, notification());
         try {
             showOverlay();
+            RuntimeDiagnostics.petServiceEvent(this, "桌宠已启动");
         } catch (RuntimeException error) {
             android.util.Log.e("BandoriLove", "Could not show Android pet", error);
+            stopEvent = "悬浮窗启动失败";
             stopSelf();
         }
         return START_STICKY;
+    }
+
+    @Override public void onTaskRemoved(Intent rootIntent) {
+        if (rootIntent != null && new ComponentName(this, MainActivity.class).equals(rootIntent.getComponent())) {
+            RuntimeDiagnostics.processEvent(this, "收到最近任务移除回调");
+            settingsOpen = false;
+            if (homeVisibility != null) homeVisibility.panelTaskRemoved();
+            updateVisibility();
+        }
+        super.onTaskRemoved(rootIntent);
     }
 
     private Notification notification() {
@@ -128,7 +149,7 @@ public final class PetService extends Service {
         channel.enableVibration(false);
         channel.setShowBadge(false);
         manager.createNotificationChannel(channel);
-        return new Notification.Builder(this, NOTIFICATION_CHANNEL).setContentTitle("BandoriLovePet")
+        return new Notification.Builder(this, NOTIFICATION_CHANNEL).setContentTitle(getString(R.string.app_name))
                 .setSmallIcon(R.drawable.pet_icon).setOngoing(true).setOnlyAlertOnce(true)
                 .setVisibility(Notification.VISIBILITY_SECRET).build();
     }
@@ -145,15 +166,12 @@ public final class PetService extends Service {
         window = overlay.getSystemService(WindowManager.class);
         readScreenBounds();
         frame = overlayFrame();
-        player = new PetWeb(overlay, true, () -> {}, this::stopSelf, () -> startActivity(panelIntent()),
-                ignored -> {}, ignored -> {}, ignored -> {}, this::stopSelf);
+        player = createPlayer(overlay);
         resetPlacement();
         container = new DragFrame(overlay);
-        // Keep the WebView's pixel density and the controls fixed as the model scales.
-        container.addView(player.view(), new FrameLayout.LayoutParams(shortSide(), longSide()));
+        attachPlayerView();
         container.setVisibility(View.INVISIBLE);
         container.addOnLayoutChangeListener((v, l, t, r, b, previousL, previousT, previousR, previousB) -> pushTouchRegion());
-        player.onTouchShapeChanged(this::updateWindowCrop);
         window.addView(container, frame);
         displays.registerDisplayListener(displayListener, main);
         updateWindowCrop();
@@ -161,6 +179,52 @@ public final class PetService extends Service {
         configureVisibility(homeOnly(this));
         player.load();
         DesktopRuntime.reportPet();
+    }
+
+    private PetWeb createPlayer(Context context) {
+        return new PetWeb(context, true, () -> {}, this::stopFromMenu, () -> startActivity(panelIntent()),
+                ignored -> {}, ignored -> {}, ignored -> {}, this::recoverRenderer);
+    }
+
+    private void stopFromMenu() {
+        stopEvent = "用户从桌宠菜单退出";
+        stopSelf();
+    }
+
+    private void attachPlayerView() {
+        // Keep the WebView's pixel density and the controls fixed as the model scales.
+        container.addView(player.view(), new FrameLayout.LayoutParams(shortSide(), longSide()));
+        player.onTouchShapeChanged(this::updateWindowCrop);
+    }
+
+    private void recoverRenderer() {
+        RuntimeDiagnostics.processEvent(this, "桌宠渲染进程退出");
+        long now = SystemClock.uptimeMillis();
+        if (now < nextRendererRecoveryAt || container == null || !container.isAttachedToWindow()) {
+            stopEvent = "渲染进程退出后无法恢复";
+            stopSelf();
+            return;
+        }
+        nextRendererRecoveryAt = now + RENDERER_RECOVERY_INTERVAL_MS;
+        PetWeb failed = player;
+        container.removeView(failed.view());
+        failed.destroy();
+        player = null;
+        try {
+            player = createPlayer(container.getContext());
+            container.cancelGesture();
+            player.desktopScale(canvasWidth / (float) shortSide());
+            player.desktopRotation(desktopRotation);
+            rendererRecovering = true;
+            player.view().setAlpha(0f);
+            attachPlayerView();
+            updateWindowCrop();
+            player.load();
+        } catch (RuntimeException error) {
+            android.util.Log.e("BandoriLovePet", "Could not recover the pet renderer", error);
+            stopEvent = "重建桌宠渲染器失败";
+            stopSelf();
+        }
     }
 
     private WindowManager.LayoutParams overlayFrame() {
@@ -203,7 +267,7 @@ public final class PetService extends Service {
     private int longSide() { return Math.max(displayWidth, displayHeight); }
 
     private void updateWindowCrop() {
-        if (container == null || !container.isAttachedToWindow()) return;
+        if (player == null || container == null || !container.isAttachedToWindow()) return;
         if (container.moving()) return;
         PetTouchShape shape = player.touchShape();
         Rect model = new Rect();
@@ -216,6 +280,13 @@ public final class PetService extends Service {
             model.inset(-visualPadding, -visualPadding);
             model.intersect(0, 0, canvasWidth, canvasHeight);
             updateModelCrop(model, renderedRotation, shape.modelRevision());
+            if (rendererRecovering && visible) {
+                rendererRecovering = false;
+                PetWeb restored = player;
+                restored.afterVisualState(() -> {
+                    if (player == restored) fadeIn(restored.view());
+                });
+            }
         }
         Region controlRegion = new Region();
         shape.addControls(controlRegion, player.view().getWidth(), player.view().getHeight());
@@ -231,12 +302,12 @@ public final class PetService extends Service {
         RectF visible = new RectF(model.left / (float) canvasWidth, model.top / (float) canvasHeight,
                 model.right / (float) canvasWidth, model.bottom / (float) canvasHeight);
         boolean newPose = cropRotation != renderedRotation || cropModelRevision != modelRevision;
-        if (!newPose && cropArea.contains(visible)) return;
+        if (!rendererRecovering && !newPose && cropArea.contains(visible)) return;
         int margin = dp(12);
         visible.inset(-margin / (float) canvasWidth, -margin / (float) canvasHeight);
         visible.intersect(0, 0, 1, 1);
         // Rebuild the frame for each new pose, while leaving room for small idle motions.
-        if (newPose) cropArea.set(visible);
+        if (newPose && !rendererRecovering) cropArea.set(visible);
         else cropArea.union(visible);
         cropRotation = renderedRotation;
         cropModelRevision = modelRevision;
@@ -323,14 +394,22 @@ public final class PetService extends Service {
     }
 
     private void updateVisibility() {
+        if (player == null || container == null) return;
         boolean show = wantedVisible && !settingsOpen;
         if (visible == show) return;
         visible = show;
         if (!show && (container.moving() || container.capturingModelTouches)) container.cancelGesture();
+        container.animate().cancel();
+        container.setAlpha(show && hasSilhouette && !rendererRecovering ? 0f : 1f);
         container.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
+        if (show && container.getAlpha() == 0f) fadeIn(container);
         updateWindowCrop();
         player.status();
         DesktopRuntime.reportPet();
+    }
+
+    private void fadeIn(View view) {
+        view.animate().alpha(1f).setDuration(SHOW_FADE_MS).setInterpolator(new DecelerateInterpolator()).start();
     }
 
     private int dp(int value) {
@@ -379,7 +458,7 @@ public final class PetService extends Service {
     }
 
     private void refreshDisplayBounds() {
-        if (container == null || !container.isAttachedToWindow()) return;
+        if (player == null || container == null || !container.isAttachedToWindow()) return;
         Rect previous = screen;
         int previousWidth = displayWidth, previousHeight = displayHeight;
         readScreenBounds();
@@ -434,12 +513,14 @@ public final class PetService extends Service {
     }
 
     @Override public void onDestroy() {
+        RuntimeDiagnostics.petServiceEvent(this, stopEvent);
         if (active == this) active = null;
         main.removeCallbacks(refreshDisplay);
         main.removeCallbacks(settleWindowCrop);
         if (displays != null) displays.unregisterDisplayListener(displayListener);
         if (homeVisibility != null) homeVisibility.close();
         if (container != null && container.isAttachedToWindow()) {
+            container.animate().cancel();
             container.removeCallbacks(container.applyRotation);
             window.removeViewImmediate(container);
         }
@@ -456,12 +537,12 @@ public final class PetService extends Service {
 
     static void receive(JSONObject command, boolean sound) {
         PetService current = active;
-        if (current != null) current.player.receive(command, sound && current.visible);
+        if (current != null && current.player != null) current.player.receive(command, sound && current.visible);
     }
 
     static void refresh() {
         PetService current = active;
-        if (current != null) current.player.refresh();
+        if (current != null && current.player != null) current.player.refresh();
     }
 
     static void updateCaptions(boolean enabled) {

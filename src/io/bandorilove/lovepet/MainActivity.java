@@ -1,7 +1,7 @@
 package io.bandorilove.lovepet;
 
 import android.app.Activity;
-import android.app.WallpaperInfo;
+import android.app.AlertDialog;
 import android.app.WallpaperManager;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
@@ -66,6 +66,7 @@ public final class MainActivity extends Activity {
     private enum WallpaperTransition { IDLE, ENTERING, COVERED, RELOADING, HOLDING, REVEALING, SETTLING }
     private ValueCallback<Uri[]> scenePicker;
     private static WeakReference<MainActivity> active = new WeakReference<>(null);
+    private static DesktopTile.PanelAction tileAction;
     private final ExecutorService imports = Executors.newSingleThreadExecutor();
     private final WallpaperManager.OnColorsChangedListener wallpaperListener = (colors, which) -> {
         updateWallpaperStatus();
@@ -95,7 +96,7 @@ public final class MainActivity extends Activity {
     private boolean wallpaperChanging;
     private Boolean wallpaperObserved;
     private boolean wallpaperApplySuccessPending;
-    private Boolean wallpaperDirectAllowed;
+    private volatile Boolean wallpaperDirectAllowed;
     private boolean wallpaperDirectNeedsCheck = true;
     private int wallpaperApplyInitialId = -1;
     private WallpaperTransition wallpaperTransition = WallpaperTransition.IDLE;
@@ -213,12 +214,13 @@ public final class MainActivity extends Activity {
         }
         presentWallpaperResult();
         fadeStartupCover();
+        runTileAction();
     }
 
     private void fadeStartupCover() {
         if (!startupPanelCover || panelCoverFading || !panelFrameResolved || !resumed
                 || wallpaperChanging || wallpaperTransition != WallpaperTransition.IDLE) return;
-        fadePanelCover(180, () -> {});
+        fadePanelCover(180, this::runTileAction);
     }
 
     private void fadePanelCover(long duration, Runnable finished) {
@@ -238,6 +240,8 @@ public final class MainActivity extends Activity {
     }
 
     private void showPlayerError(String message) {
+        RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.PANEL_RENDER, message);
+        RuntimeDiagnostics.processEvent(this, message);
         setSettingsVisible(false);
         setImmersivePreview(false);
         releasePlayer();
@@ -255,6 +259,11 @@ public final class MainActivity extends Activity {
         retry.setText("重试");
         retry.setOnClickListener(view -> attachPlayer());
         status.addView(retry);
+        Button diagnostics = new Button(this);
+        diagnostics.setText("运行诊断");
+        diagnostics.setOnClickListener(view -> new AlertDialog.Builder(this).setTitle("运行诊断")
+                .setMessage(RuntimeDiagnostics.report(this)).setPositiveButton("知道了", null).show());
+        status.addView(diagnostics);
         frame.addView(status, new FrameLayout.LayoutParams(-1, -1));
     }
 
@@ -316,6 +325,7 @@ public final class MainActivity extends Activity {
         updateWallpaperStatus();
         updatePermissionStatus();
         fadeStartupCover();
+        runTileAction();
         if (wallpaperPicker != 0 && wallpaperPickerPaused) {
             int request = wallpaperPicker;
             int attempt = wallpaperPickerAttempt;
@@ -344,6 +354,7 @@ public final class MainActivity extends Activity {
                     && SystemClock.uptimeMillis() - wallpaperPickerStarted >= WALLPAPER_PICKER_LAUNCH_TIMEOUT_MS) {
                 handleUnopenedWallpaperPicker(wallpaperPicker);
             }
+            runTileAction();
         }
     }
 
@@ -503,6 +514,8 @@ public final class MainActivity extends Activity {
     }
 
     private void finishImport(Exception error) {
+        RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.MODEL_LIBRARY,
+                error == null ? "模型导入成功" : "模型导入失败（" + error.getClass().getSimpleName() + "）");
         if (isDestroyed()) return;
         importing = false;
         if (player == null) return;
@@ -534,6 +547,8 @@ public final class MainActivity extends Activity {
                 Log.w("BandoriLovePet", "Saved model unavailable", error);
             }
             String result = failure;
+            RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.MODEL_LIBRARY,
+                    (remove ? "删除模型记录" : "切换已导入模型") + (result.isEmpty() ? "成功" : "失败"));
             runOnUiThread(() -> {
                 importing = false;
                 if (isDestroyed() || player != requester) return;
@@ -772,14 +787,16 @@ public final class MainActivity extends Activity {
 
     void updatePermissionStatus() {
         if (player == null) return;
+        player.permissionStatus(Settings.canDrawOverlays(this), HomeVisibility.hasUsageAccess(this), wallpaperPermissionState());
+    }
+
+    String wallpaperPermissionState() {
         WallpaperManager manager = WallpaperManager.getInstance(this);
-        boolean supported = manager.isWallpaperSupported();
-        String wallpaper;
-        if (Boolean.FALSE.equals(wallpaperDirectAllowed)) wallpaper = "disabled";
-        else if (!supported) wallpaper = "unsupported";
-        else if (!manager.isSetWallpaperAllowed()) wallpaper = "disabled";
-        else wallpaper = Boolean.TRUE.equals(wallpaperDirectAllowed) ? "enabled" : "system";
-        player.permissionStatus(Settings.canDrawOverlays(this), HomeVisibility.hasUsageAccess(this), wallpaper);
+        Boolean allowed = wallpaperDirectAllowed;
+        if (Boolean.FALSE.equals(allowed)) return "disabled";
+        if (!manager.isWallpaperSupported()) return "unsupported";
+        if (!manager.isSetWallpaperAllowed()) return "disabled";
+        return Boolean.TRUE.equals(allowed) ? "enabled" : "system";
     }
 
     private void recordWallpaperDirectResult(boolean allowed) {
@@ -824,7 +841,7 @@ public final class MainActivity extends Activity {
         }
         if (player != null) {
             player.prompt("使用情况访问",
-                    "请在系统设置中搜索「使用情况访问」，选择 BandoriLovePet 并允许访问。",
+                    "请在系统设置中搜索「使用情况访问」，选择 " + getString(R.string.app_name) + " 并允许访问。",
                     "打开系统设置", () -> openSettingsScreen(new Intent(Settings.ACTION_SETTINGS)));
         }
         return false;
@@ -844,6 +861,8 @@ public final class MainActivity extends Activity {
         wallpaperApplyAwaitingResult = true;
         if (!launchWallpaperPicker(new Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER), WALLPAPER_LIST)) {
             offerWallpaperPermission();
+        } else {
+            RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.WALLPAPER_CHANGE, "已打开系统动态壁纸列表");
         }
     }
 
@@ -854,6 +873,7 @@ public final class MainActivity extends Activity {
     }
 
     private void offerWallpaperPermission() {
+        RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.WALLPAPER_CHANGE, "系统未能应用动态壁纸，已提示检查权限");
         wallpaperApplyAwaitingResult = false;
         updatePermissionStatus();
         if (player != null) {
@@ -913,6 +933,7 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> verifyWallpaper(false, 0, true, 8));
             } catch (IOException | SecurityException error) {
                 Log.w("BandoriLovePet", "Could not restore wallpaper", error);
+                RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.WALLPAPER_CHANGE, "原图恢复失败");
                 runOnUiThread(() -> {
                     wallpaperRecovery.cancelExit();
                     if (isDestroyed()) return;
@@ -935,20 +956,11 @@ public final class MainActivity extends Activity {
     }
 
     private boolean hasWallpaper(int which) {
-        return new ComponentName(this, PetWallpaperService.class).equals(wallpaperComponent(which));
+        return WallpaperRecovery.isApplied(this, which);
     }
 
     private ComponentName wallpaperComponent(int which) {
-        try {
-            WallpaperManager manager = WallpaperManager.getInstance(this);
-            WallpaperInfo info = Build.VERSION.SDK_INT >= 34
-                    ? manager.getWallpaperInfo(which)
-                    : which == WallpaperManager.FLAG_SYSTEM ? manager.getWallpaperInfo() : null;
-            return info == null ? null : info.getComponent();
-        } catch (SecurityException error) {
-            Log.w("BandoriLovePet", "Cannot verify home wallpaper", error);
-            return null;
-        }
+        return WallpaperRecovery.activeComponent(this, which);
     }
 
     void updateWallpaperStatus() {
@@ -980,6 +992,7 @@ public final class MainActivity extends Activity {
     }
 
     private void completeWallpaperApply() {
+        RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.WALLPAPER_CHANGE, "壁纸已应用");
         wallpaperApplyAwaitingResult = false;
         wallpaperRecovery.acknowledgeExit();
         wallpaperApplySuccessPending = true;
@@ -987,6 +1000,7 @@ public final class MainActivity extends Activity {
     }
 
     private void completeWallpaperExit() {
+        RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.WALLPAPER_CHANGE, "壁纸已退出");
         wallpaperApplyAwaitingResult = false;
         wallpaperApplySuccessPending = false;
         wallpaperRecovery.confirmExit();
@@ -1140,6 +1154,8 @@ public final class MainActivity extends Activity {
             }
             return;
         }
+        RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.WALLPAPER_CHANGE,
+                (wanted ? "应用壁纸" : "退出壁纸") + (confirmed ? "未通过系统状态验证" : "未完成"));
         if (!wanted) wallpaperRecovery.cancelExit();
         if (player == null || !confirmed) {
             if (wanted) wallpaperApplyAwaitingResult = false;
@@ -1163,6 +1179,7 @@ public final class MainActivity extends Activity {
     }
 
     private void wallpaperMessage(String message) {
+        RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.WALLPAPER_CHANGE, message);
         if (player != null) player.prompt("壁纸设置", message, null, null);
     }
 
@@ -1194,8 +1211,32 @@ public final class MainActivity extends Activity {
         try {
             startForegroundService(new Intent(this, PetService.class));
         } catch (IllegalStateException | SecurityException error) {
-            if (player != null) player.notice("请保持 BandoriLovePet 在前台并重试");
+            RuntimeDiagnostics.petServiceEvent(this, "系统未能启动桌宠服务（" + error.getClass().getSimpleName() + "）");
+            if (player != null) player.notice("请保持 " + getString(R.string.app_name) + " 在前台并重试");
         }
+    }
+
+    static void queueTileAction(DesktopTile.PanelAction action) {
+        tileAction = action;
+    }
+
+    private void runTileAction() {
+        if (tileAction == null || player == null || !resumed || !hasWindowFocus()
+                || !panelFrameResolved || startupPanelCover) return;
+        DesktopTile.PanelAction action = tileAction;
+        tileAction = null;
+        if (action == DesktopTile.PanelAction.START_PET) {
+            if (store.active() == null) player.notice("请先导入模型");
+            else if (!DesktopRuntime.isPetRunning(this)) togglePet();
+            return;
+        }
+        boolean exit = action == DesktopTile.PanelAction.RESTORE_WALLPAPER;
+        if (exit != hasWallpaper(WallpaperManager.FLAG_SYSTEM)) return;
+        if (!exit && !panelModelReady) {
+            player.notice(store.active() == null ? "请先导入模型" : "请等待模型加载完成后重试");
+            return;
+        }
+        player.runWallpaperTileAction(exit);
     }
 
     static void petChanged() {

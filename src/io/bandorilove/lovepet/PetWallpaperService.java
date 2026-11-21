@@ -186,6 +186,7 @@ public final class PetWallpaperService extends WallpaperService {
                 }
             } catch (RuntimeException error) {
                 Log.e("BandoriLovePet", "Wallpaper renderer failed", error);
+                recordStartupFailure();
                 rendererFailed();
             }
         }
@@ -198,13 +199,14 @@ public final class PetWallpaperService extends WallpaperService {
                 PetWeb renderer = player;
                 renderer.onWallpaperFrameReady(() -> showLiveFrame(renderer));
                 content.addView(renderer.view(), 0, new FrameLayout.LayoutParams(-1, -1));
-                renderer.loadWallpaper();
+                renderer.loadWallpaper(isPreview());
                 rendererVisible = visible && surfaceWidth > 0;
                 renderer.wallpaperVisible(rendererVisible);
                 renderer.setWallpaperTiltVisible(rendererVisible);
                 updatePlaybackOwner();
             } catch (RuntimeException error) {
                 Log.e("BandoriLovePet", "Wallpaper WebView startup failed", error);
+                recordStartupFailure();
                 rendererFailed();
             }
         }
@@ -243,6 +245,11 @@ public final class PetWallpaperService extends WallpaperService {
                     if (cover.getParent() instanceof ViewGroup) ((ViewGroup) cover.getParent()).removeView(cover);
                 }).start();
             }
+        }
+
+        private void recordStartupFailure() {
+            RuntimeDiagnostics.event(PetWallpaperService.this, isPreview() ? RuntimeDiagnostics.Area.WALLPAPER_PREVIEW
+                    : RuntimeDiagnostics.Area.WALLPAPER_RENDER, "壁纸渲染器启动失败");
         }
 
         private void rendererFailed() {

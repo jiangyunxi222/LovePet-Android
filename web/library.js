@@ -56,6 +56,7 @@
     thumb.width = Math.max(1, Math.round(canvas.width * scale));
     thumb.height = Math.max(1, Math.round(canvas.height * scale));
     try {
+      if (!hasVisibleModelPixels()) return;
       thumb.getContext("2d").drawImage(canvas, 0, 0, thumb.width, thumb.height);
       sceneLayers.media("model-preview:" + view.session.version, thumb.toDataURL("image/webp", .8)).catch(console.error);
     } catch (error) { console.error("Model preview unavailable", error); }

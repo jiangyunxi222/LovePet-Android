@@ -1,12 +1,11 @@
 <resources>
-    <string name="wallpaper_label">BandoriLovePet</string>
     <string name="wallpaper_settings">动态壁纸权限设置</string>
     <string name="wallpaper_settings_unavailable">无法打开动态壁纸权限设置。</string>
-    <string name="wallpaper_help_no_permission_page">找不到单独的「动态壁纸服务」设置。可在系统壁纸里选择 BandoriLovePet，或在应用设置中查看权限。</string>
+    <string name="wallpaper_help_no_permission_page">找不到单独的「动态壁纸服务」设置。可在系统壁纸里选择 LovePet，或在应用设置中查看权限。</string>
     <string name="wallpaper_help_restricted">系统当前限制更换壁纸。可在应用设置中查看权限。</string>
     <string name="wallpaper_help_unsupported">系统未向本应用提供动态壁纸支持。可在系统壁纸设置中确认。</string>
     <string name="wallpaper_help_manual_picker">无法直接打开壁纸列表。请长按桌面空白处，从「壁纸」中选择动态壁纸。</string>
-    <string name="wallpaper_help_manual_app_info">无法直接打开应用设置。请在系统设置的应用管理中找到 BandoriLovePet。</string>
+    <string name="wallpaper_help_manual_app_info">无法直接打开应用设置。请在系统设置的应用管理中找到 LovePet。</string>
     <string name="wallpaper_open_picker">系统壁纸</string>
     <string name="wallpaper_open_app_info">应用设置</string>
     <string name="wallpaper_settings_cancel">取消</string>
@@ -15,11 +14,7 @@
     <string name="wallpaper_exit_title">壁纸已退出</string>
     <string name="wallpaper_exit_message">已恢复主屏幕壁纸。</string>
     <string name="wallpaper_view_desktop">查看桌面</string>
-    <string name="wallpaper_description">BandoriLovePet 图层动态壁纸</string>
-    <color name="wallpaper_dialog_ink">#432C42</color>
-    <color name="wallpaper_dialog_surface">#FFFCFD</color>
-    <color name="wallpaper_dialog_line">#EADBE5</color>
-    <color name="wallpaper_dialog_accent">#9F4F77</color>
+    <string name="wallpaper_description">LovePet 图层动态壁纸</string>
     <style name="WallpaperResultTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsTranslucent">true</item>

@@ -112,7 +112,6 @@ function importProgress(on) {
   busy = on;
   $("#replace").disabled = $("#choose").disabled = on;
   $("#toggle").disabled = on || !view.model;
-  updatePerformanceButton();
   updateWallpaperButton();
   $("#status").classList.remove("error");
   $("#status").textContent = on ? "正在导入模型…" : "";
@@ -140,7 +139,6 @@ function updateWallpaperButton() {
   button.setAttribute("aria-pressed", String(wallpaperApplied));
   button.setAttribute("aria-busy", String(wallpaperChanging));
   button.title = wallpaperChanging ? "正在设置壁纸" : wallpaperApplied ? "退出壁纸" : "显示壁纸";
-  $("#welcome-wallpaper").hidden = !wallpaperApplied;
   $("#welcome-wallpaper").disabled = wallpaperChanging;
   $("#scene-apply").disabled = busy || wallpaperChanging || !view.model;
   $("#scene-apply").setAttribute("aria-busy", String(wallpaperChanging));
@@ -166,9 +164,8 @@ window.setPermissionStatus = (overlay, usage, wallpaperMode) => {
 
 function updateControlsVisibility() {
   const limited = view.session?.limited;
-  $("#role-settings").hidden = limited;
+  $("#favorite-interactions-row").hidden = limited;
   $("#open-performance").hidden = !view.session || limited;
-  updatePerformanceButton();
   $("#controls").hidden = limited || controlsCollapsed;
   document.documentElement.classList.toggle("preview-only", !pet && (limited || controlsCollapsed));
   const immersive = !pet && !wallpaper && !!view.session
@@ -176,9 +173,9 @@ function updateControlsVisibility() {
   if (document.documentElement.classList.contains("immersive-preview") !== immersive) {
     document.documentElement.classList.toggle("immersive-preview", immersive);
     native.immersivePreview(immersive);
+    window.sceneLayers?.render();
   }
   revealPreviewControls();
-  $("#controls-toggle").checked = !controlsCollapsed;
   if (!pet && !wallpaper) window.sceneLayers?.updateTiltPreview();
 }
 
@@ -223,7 +220,7 @@ function revealPreviewControls(edge) {
 
 function title(text) {
   $("#name").textContent = text;
-  document.title = text + " · BandoriLovePet";
+  document.title = text + " · LovePet";
 }
 
 function beginPanelLoad() {
@@ -252,6 +249,7 @@ async function refreshModel() {
       ++view.generation;
       for (const model of view.app?.stage.removeChildren() || []) model.destroy({ children: true });
       view.session = view.model = view.costume = null;
+      native.reportModelRendering?.("empty");
       $("#player").hidden = $("#replace").hidden = true;
       $("#welcome").hidden = false;
       updateControlsVisibility();
@@ -281,7 +279,8 @@ async function refreshModel() {
       button.hidden = session.limited;
     });
     title(catalog.name);
-    const selected = catalog.costumes.find((item) => item.id === native.costume(catalog.id || ""));
+    const savedCostume = native.costume(catalog.id || "");
+    const selected = catalog.costumes.find((item) => item.id === savedCostume || item.aliasIds?.includes(savedCostume));
     setTab("action");
     ready = await selectCostume(selected || catalog.costumes[0]);
     window.modelPreviewChanged?.();
@@ -291,6 +290,7 @@ async function refreshModel() {
     petStatus(native.petShowing(), native.petVisible(), native.homeOnly());
   } catch (error) {
     importProgress(false);
+    native.reportModelRendering?.("error");
     reportError(error.message);
     console.error(error);
   } finally {
@@ -492,7 +492,7 @@ function makeRenderer() {
   });
   resize.observe(stage);
   const pause = () => { ticker.autoStart = false; ticker.stop(); };
-  if (wallpaper && !wallpaperVisible) pause();
+  if (wallpaper ? !wallpaperVisible : !pet && !panelPlaybackActive) pause();
   return { renderer, stage: contents, screen: renderer.screen, readAlpha, syncCanvas,
     prepareModel, scheduleQualitySync, setScenePinching, pause, resume: () => ticker.start(),
     requestDesktopRotation: () => { desktopRotationPending = true; } };
@@ -509,6 +509,10 @@ function makeAlphaSampler(canvas) {
     pixels.drawImage(canvas, 0, 0, touchColumns, touchRows);
     return pixels.getImageData(0, 0, touchColumns, touchRows).data;
   };
+}
+
+function hasVisibleModelPixels() {
+  return view.app.readAlpha().some((alpha, index) => index % 4 === 3 && alpha >= 28);
 }
 
 function makeTouchSampler(readAlpha) {
@@ -576,13 +580,15 @@ function placeModel() {
   const fitVisible = pet || wallpaper || document.documentElement.classList.contains("immersive-preview");
   const scale = Math.min(width * (fitVisible ? .72 : .91) / bounds.width,
     height * (fitVisible ? .66 : .96) / bounds.height);
+  const x = width * .5;
+  const y = height * (fitVisible ? .5 : .985);
   view.model.scale.set(scale);
   view.model.angle = 0;
   view.model.anchor.set(.5, fitVisible ? .5 : 1);
-  view.model.position.set(width * .5, height * (fitVisible ? .5 : .985));
+  view.model.position.set(x, y);
   if (fitVisible) fitVisibleModel(width, height);
   if (view.sceneCharacterTransform || desktopRotation) {
-    const { scale: zoom = 1, x = 0, y = 0, rotation = desktopRotation } = view.sceneCharacterTransform || {};
+    const { scale: zoom = 1, x: offsetX = 0, y: offsetY = 0, rotation = desktopRotation } = view.sceneCharacterTransform || {};
     const radians = rotation * Math.PI / 180;
     const cos = Math.cos(radians), sin = Math.sin(radians);
     let adjustedZoom = zoom;
@@ -598,8 +604,17 @@ function placeModel() {
     const dx = view.model.position.x - centerX, dy = view.model.position.y - centerY;
     view.model.scale.set(view.model.scale.x * adjustedZoom);
     view.model.angle = rotation;
-    view.model.position.set(centerX + width * x + (dx * cos - dy * sin) * adjustedZoom,
-      centerY + height * y + (dx * sin + dy * cos) * adjustedZoom);
+    view.model.position.set(centerX + width * offsetX + (dx * cos - dy * sin) * adjustedZoom,
+      centerY + height * offsetY + (dx * sin + dy * cos) * adjustedZoom);
+    if (!fitVisible) {
+      view.app.renderer.render(view.app.stage);
+      // A saved wallpaper pose can move the entire character outside the panel.
+      if (!hasVisibleModelPixels()) {
+        view.model.scale.set(scale);
+        view.model.angle = 0;
+        view.model.position.set(x, y);
+      }
+    }
   }
   if (view.session.limited && !desktopMoving) updateThirdPartyMenuButton();
 }
@@ -678,6 +693,7 @@ async function selectCostume(costume) {
   } finally {
     if (generation === view.generation) {
       $("#loading").hidden = true;
+      native.reportModelRendering?.(ready ? "ready" : "error");
       finishPanelLoad(ticket, ready);
     }
   }
@@ -704,7 +720,7 @@ function renderItems() {
   if (!view.session || view.session.limited || pet) return;
   const query = $("#filter").value.trim().toLocaleLowerCase();
   const entries = items(view.tab).filter((item) =>
-    (!showFavorites || favoriteIds.has(item.flag)) &&
+    (!showFavorites || isFavorite(item, favoriteIds)) &&
     (item.name || "").toLocaleLowerCase().includes(query));
   const list = document.createDocumentFragment();
   for (const item of entries) {
@@ -713,10 +729,12 @@ function renderItems() {
     if (view.tab === "costume") play.setAttribute("aria-pressed", String(view.costume?.id === item.id));
     row.append(play);
     if (item.flag) {
-      const saved = favoriteIds.has(item.flag);
+      const saved = isFavorite(item, favoriteIds);
       const heart = button(saved ? "♥" : "♡", "heart", () => {
-        if (saved) favoriteIds.delete(item.flag);
-        else favoriteIds.add(item.flag);
+        if (saved) {
+          favoriteIds.delete(item.flag);
+          for (const alias of item.aliasFlags || []) favoriteIds.delete(alias);
+        } else favoriteIds.add(item.flag);
         writeDesktopSetting("favorites:" + view.session.catalog.id, [...favoriteIds]);
         renderItems();
       });
@@ -745,6 +763,10 @@ function setTab(tab) {
 
 function readFavoriteIds() {
   return new Set(JSON.parse(readDesktopSetting("favorites:" + view.session.catalog.id) || "[]"));
+}
+
+function isFavorite(item, favorites) {
+  return favorites.has(item.flag) || item.aliasFlags?.some(flag => favorites.has(flag));
 }
 
 function readDesktopSetting(key) {
@@ -785,7 +807,14 @@ function updateLoopOwner() {
 
 window.setPlaybackActive = (active) => {
   if (wallpaper) wallpaperPlaybackActive = active;
-  else panelPlaybackActive = active;
+  else {
+    panelPlaybackActive = active;
+    if (!pet) {
+      if (active) view.app?.resume();
+      else view.app?.pause();
+      window.sceneLayers?.setVisible(active && !document.hidden);
+    }
+  }
   updateLoopOwner();
 };
 if (!pet && !wallpaper) document.addEventListener("visibilitychange", updateLoopOwner);
@@ -846,7 +875,7 @@ function playRandom(kind, filter = () => true) {
 function playInteraction(kind, filter = () => true) {
   const favorites = native.interactionFavoritesOnly() ? readFavoriteIds() : null;
   const played = playRandom(kind, (item) => filter(item) && (!favorites || (
-    favorites.has(item.flag) && (kind !== "costume" || item.id !== view.costume?.id)
+    isFavorite(item, favorites) && (kind !== "costume" || item.id !== view.costume?.id)
   )));
   if (!played && favorites) {
     const detail = kind === "costume" ? "请先收藏另一套衣装" : `这个部位暂无已收藏的${names[kind]}`;
@@ -997,7 +1026,10 @@ function cancelPlayback() {
 function readPerformances(role) {
   try {
     const data = JSON.parse(readDesktopSetting("performances:" + role));
-    if (data && typeof data.enabled === "boolean" && data.groups && typeof data.groups === "object") return data;
+    if (data && typeof data.enabled === "boolean" && data.groups && typeof data.groups === "object") {
+      mergeOutfitPerformances(data.groups, view.session?.catalog.costumes || []);
+      return data;
+    }
   } catch {}
   return { enabled: false, groups: {} };
 }
@@ -1008,17 +1040,8 @@ function writePerformances(role, update) {
   writeDesktopSetting("performances:" + role, data);
 }
 
-function updatePerformanceButton() {
-  const button = $("#performance-toggle");
-  const supported = Boolean(view.session && !view.session.limited);
-  button.hidden = !supported;
-  button.disabled = busy || !view.model || !supported;
-  button.setAttribute("aria-pressed", String(supported && readPerformances(view.session.catalog.id).enabled));
-}
-
 function setPerformanceEnabled(role, enabled) {
   writePerformances(role, (data) => { data.enabled = enabled; });
-  updatePerformanceButton();
 }
 
 function nextPerformance(data) {
@@ -1052,7 +1075,7 @@ async function playPerformance(outfit, presetId, sound, automatic) {
   const tracks = {};
   for (const kind of performanceTracks) {
     if (!group.tracks[kind]) continue;
-    const item = choices[kind].find((entry) => entry.flag === group.tracks[kind]);
+    const item = choices[kind].find((entry) => matchesItemFlag(entry, group.tracks[kind]));
     if (!item) return;
     tracks[kind] = item;
   }
@@ -1126,6 +1149,7 @@ async function receiveCommand(command, sound) {
       if (sound) delay += (await playVoice(item)) ?? 0;
     }
   } catch (error) {
+    native.reportRuntimeFailure?.(type);
     reportError(error.message);
     console.error(error);
   } finally {
@@ -1270,7 +1294,10 @@ function avatarClick(event) {
     const coordinates = avatarCoordinates(event);
     const action = region || (coordinates && view.viewerCostume?.hasTap && avatarOpaque(coordinates))
       ? view.viewerCostume?.choose(region) : null;
-    if (action) playViewerAction(action).catch(error => window.showAppNotice(error.message));
+    if (action) playViewerAction(action).catch(error => {
+      native.reportRuntimeFailure?.("viewer-action");
+      window.showAppNotice(error.message);
+    });
     return;
   }
   if (region === "menu") {
@@ -1281,22 +1308,18 @@ function avatarClick(event) {
   else if (region === "body") {
     const performance = readPerformances(view.session.catalog.id);
     if (performance.enabled) sendPerformance(performance);
-    else playInteraction("action", (item) => item.category === "body");
+    else playInteraction("action", (item) => actionMatchesRegion(item, "body"));
   }
-  else if (region) playInteraction("action", (item) => item.category === region);
+  else if (region) playInteraction("action", (item) => actionMatchesRegion(item, region));
+}
+
+function actionMatchesRegion(item, region) {
+  return item.categories ? item.categories.includes(region) : item.category === region;
 }
 
 $("#choose").onclick = () => native.pickModel();
 $("#replace").onclick = () => window.openModelLibrary?.();
 for (const selector of ["#toggle", "#exit-pet"]) $(selector).onclick = () => native.togglePet();
-$("#performance-toggle").onclick = () => {
-  const role = view.session.catalog.id;
-  try {
-    setPerformanceEnabled(role, !readPerformances(role).enabled);
-  } catch (error) {
-    window.showAppNotice(error.message);
-  }
-};
 for (const selector of ["#reset", "#pet-reset"]) $(selector).onclick = () => send("reset");
 $("#open-panel").onclick = () => { showPetMenu(false); native.openPanel(); };
 $("#close-pet-menu").onclick = () => showPetMenu(false);
@@ -1341,6 +1364,46 @@ permissions.addEventListener("close", syncAppModalVisibility);
 permissions.querySelectorAll("[data-permission]").forEach(control => {
   control.onclick = () => native.openPermission(control.dataset.permission);
 });
+const diagnostics = $("#runtime-diagnostics");
+$("#open-diagnostics").onclick = () => {
+  const report = diagnostics.querySelector(".diagnostics-report");
+  const sections = native.runtimeDiagnostics().split("\n\n");
+  const playback = ["当前面板与播放",
+    "模型  " + (!$("#loading").hidden ? "加载中" : view.model ? "已显示" : "未显示"),
+    "当前视图  " + (document.documentElement.classList.contains("immersive-preview") ? "纯享" : "控制面板"),
+    "字幕  " + (captionCardsEnabled ? "已开启" : "未开启"),
+    "触控菜单  " + (touchMenuEnabled ? "已开启" : "未开启")];
+  if (view.session && !view.session.limited) {
+    const { enabled, groups } = readPerformances(view.session.catalog.id);
+    playback.push("可用内容  " + Object.keys(names).map(kind => names[kind] + " " + items(kind).length).join(" · "),
+      "循环  " + ([...loops].map(kind => names[kind]).join("、") || "未开启"),
+      `演出模式  ${enabled ? "已开启" : "未开启"} · ${Object.values(groups).flatMap(outfitPerformances).length} 个演出组`);
+  } else if (view.session) {
+    playback.push("模型模式  " + (view.viewer ? "第三方互动模型" : "基础预览"));
+  }
+  const scene = window.sceneLayers;
+  const layers = scene?.layers || [];
+  const materials = ["当前素材预览", "图层  " + layers.length,
+    "素材  " + layers.filter(layer => layer.media).length + " · 特效  " + layers.filter(layer => layer.kind === "effect").length,
+    "可见素材  " + (scene?.mediaReady() ? "就绪" : "未就绪"),
+    "默认背景配色  " + $("#theme-current").textContent,
+    "背景微动  " + (!native.hasWallpaperTilt() ? "设备不支持" : native.wallpaperTiltEnabled() ? "已开启" : "未开启")];
+  sections.splice(-1, 0, playback.join("\n"), materials.join("\n"));
+  report.replaceChildren(...sections.map(content => {
+    const firstLine = content.indexOf("\n");
+    const section = document.createElement("section");
+    const title = document.createElement("h3");
+    title.textContent = content.slice(0, firstLine);
+    const body = document.createElement("p");
+    body.textContent = content.slice(firstLine + 1);
+    section.append(title, body);
+    return section;
+  }));
+  diagnostics.showModal();
+  report.scrollTop = 0;
+  syncAppModalVisibility();
+};
+diagnostics.addEventListener("close", syncAppModalVisibility);
 settings.addEventListener("close", () => {
   syncAppModalVisibility();
   revealPreviewControls();
@@ -1406,10 +1469,6 @@ $("#caption-cards").onchange = (event) => {
   const enabled = event.target.checked;
   window.setCaptionCardsEnabled(enabled);
   native.setCaptionCardsEnabled(enabled);
-};
-$("#controls-toggle").onchange = (event) => {
-  setControlsCollapsed(!event.target.checked);
-  settings.close();
 };
 const avatarCanvas = $("#canvas");
 function endPreviewPress() {
@@ -1523,7 +1582,6 @@ function scheduleWallpaperFrame() {
 function updateTouchMenuSetting() {
   const thirdParty = Boolean(view.session?.limited);
   $("#touch-menu").checked = thirdParty ? thirdPartyMenuEnabled : touchMenuEnabled;
-  $("#touch-menu-hint").textContent = thirdParty ? "从右下角三点打开菜单" : "点击角色腿部打开菜单";
 }
 
 window.setTouchMenuEnabled = (enabled, thirdParty = false) => {

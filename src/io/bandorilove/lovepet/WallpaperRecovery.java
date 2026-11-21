@@ -1,12 +1,15 @@
 package io.bandorilove.lovepet;
 
+import android.app.WallpaperInfo;
 import android.app.WallpaperManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Build;
 import android.util.AtomicFile;
+import android.util.Log;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -24,6 +27,23 @@ final class WallpaperRecovery {
         this.context = context;
         preferences = context.getSharedPreferences("wallpaper-recovery", Context.MODE_PRIVATE);
         photo = new AtomicFile(new File(context.getFilesDir(), "previous-wallpaper.img"));
+    }
+
+    static boolean isApplied(Context context, int which) {
+        return new ComponentName(context, PetWallpaperService.class).equals(activeComponent(context, which));
+    }
+
+    static ComponentName activeComponent(Context context, int which) {
+        try {
+            WallpaperManager manager = WallpaperManager.getInstance(context);
+            WallpaperInfo info = Build.VERSION.SDK_INT >= 34
+                    ? manager.getWallpaperInfo(which)
+                    : which == WallpaperManager.FLAG_SYSTEM ? manager.getWallpaperInfo() : null;
+            return info == null ? null : info.getComponent();
+        } catch (SecurityException error) {
+            Log.w("BandoriLovePet", "Cannot verify home wallpaper", error);
+            return null;
+        }
     }
 
     void beginExit(int wallpaperId) {
