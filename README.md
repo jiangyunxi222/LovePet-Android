@@ -2,7 +2,7 @@
 
 适用于 Android 11 及以上版本，使用系统提供的 Android System WebView。
 
-[下载 LovePet 1.0.0 正式 APK](https://github.com/jiangyunxi222/BandoriLovePet/releases/tag/LovePet_Android_V1.0.0)
+[下载 LovePet 1.0.0 正式 APK](https://github.com/jiangyunxi222/LovePet-Android/releases/tag/LovePet_Android_V1.0.0) · [LovePet Windows](https://github.com/jiangyunxi222/LovePet-Windows)
 
 手机角色库收录 [Garupa 的 47 个单角色包](https://github.com/jiangyunxi222/GarupaLive2D-Mobile) 和 [OurNotes 的 44 个单角色包](https://github.com/jiangyunxi222/OurNotesLive2D-Mobile)。制作或转换可使用 [LovePetTool](https://github.com/jiangyunxi222/LovePetTool)。
 
