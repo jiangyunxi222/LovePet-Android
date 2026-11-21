@@ -11,7 +11,7 @@
 - 点「显示桌宠」并授予浮窗权限，即可拖动角色、双指缩放。完整角色包用腿部触控区打开菜单，第三方 LPK、WPK 支持可识别的包内触控。「关闭菜单」只收起菜单。可在控制台或桌宠菜单退出桌宠。
 - 在应用内「设置」可选择「浮于应用上层」或「在主屏幕显示」。后者需要系统的使用情况访问权限，打开其他应用时隐藏桌宠，回到主屏幕后恢复。
 - 「设置 → 权限配置」可查看悬浮窗、使用情况访问和动态壁纸的状态，返回应用后自动更新。动态壁纸通过系统确认。如果系统确认后仍显示旧壁纸，可从这里打开应用信息，检查系统是否提供「动态壁纸服务」权限。
-- 双击角色预览的空白背景，在角色控制和全屏纯享之间切换。
+- 使用设置中的「纯享模式」开关，或双击角色预览的空白背景，可在角色控制和全屏纯享之间切换。
 - 「触控菜单」在角色发行包中默认开启。第三方模型默认关闭，开启后点右下角「⋯」即可打开。
 - 「设置 → 主题配色」提供 12 套主题，可调整软件的按钮、卡片和设置界面。
 - 「互动收藏」将角色触控触发的动作、表情、换装和语音限制在收藏内容内。
@@ -44,6 +44,6 @@ adb install -r dist/BandoriLovePet-debug.apk
 pwsh -File ./build.ps1 -ReleaseKeystore 'D:\signing\release.p12' -SigningLineage 'D:\signing\lineage.bin'
 ```
 
-正式包输出到 `dist/BandoriLovePet.apk`。LovePet 的显示版本为 1.0.0，Android 内部版本号为 12。应用 ID 为 `io.bandorilove.lovepet`，签名轮换证明用于已有安装的覆盖升级。
+正式包输出到 `dist/BandoriLovePet.apk`。LovePet 的显示版本为 1.0.0，Android 内部版本号为 13。应用 ID 为 `io.bandorilove.lovepet`，签名轮换证明用于已有安装的覆盖升级。
 
 tsParticles 使用 MIT 许可证，完整声明位于 `vendor/tsparticles-LICENSE.txt`，依赖来源与校验值位于 `vendor/tsparticles-sources.json`，均随 APK 一并打包。其他依赖见 [第三方声明](THIRD_PARTY_NOTICES.txt)。

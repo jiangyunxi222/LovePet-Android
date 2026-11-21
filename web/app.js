@@ -164,6 +164,8 @@ window.setPermissionStatus = (overlay, usage, wallpaperMode) => {
 
 function updateControlsVisibility() {
   const limited = view.session?.limited;
+  $("#pure-preview-row").hidden = !view.session || limited;
+  $("#pure-preview-toggle").checked = controlsCollapsed;
   $("#favorite-interactions-row").hidden = limited;
   $("#open-performance").hidden = !view.session || limited;
   $("#controls").hidden = limited || controlsCollapsed;
@@ -1464,6 +1466,10 @@ $("#mode-home").onchange = () => {
   }
 };
 $("#grant-usage").onclick = () => native.setHomeOnly(true);
+$("#pure-preview-toggle").onchange = (event) => {
+  setControlsCollapsed(event.target.checked);
+  settings.close();
+};
 $("#favorite-interactions").onchange = (event) => native.setInteractionFavoritesOnly(event.target.checked);
 $("#caption-cards").onchange = (event) => {
   const enabled = event.target.checked;
