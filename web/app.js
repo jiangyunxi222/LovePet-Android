@@ -506,7 +506,14 @@ function makeAlphaSampler(canvas) {
   sample.width = touchColumns;
   sample.height = touchRows;
   const pixels = sample.getContext("2d", { willReadFrequently: true });
-  return () => {
+  return (point) => {
+    if (point) {
+      const x = Math.floor(point.x * canvas.width);
+      const y = Math.floor(point.y * canvas.height);
+      pixels.clearRect(0, 0, 1, 1);
+      pixels.drawImage(canvas, x, y, 1, 1, 0, 0, 1, 1);
+      return pixels.getImageData(0, 0, 1, 1).data[3];
+    }
     pixels.clearRect(0, 0, touchColumns, touchRows);
     pixels.drawImage(canvas, 0, 0, touchColumns, touchRows);
     return pixels.getImageData(0, 0, touchColumns, touchRows).data;
@@ -1572,7 +1579,7 @@ if (!pet && !wallpaper) {
       return;
     }
     const coordinates = event.target.closest("#canvas") && avatarCoordinates(event);
-    if (coordinates && avatarOpaque(coordinates)) {
+    if (coordinates && view.app.readAlpha(coordinates) >= 28) {
       backgroundTap = null;
       clearTimeout(previewEdgeTimer);
       return;
