@@ -164,7 +164,7 @@ window.setPermissionStatus = (overlay, usage, wallpaperMode) => {
 
 function updateControlsVisibility() {
   const limited = view.session?.limited;
-  $("#pure-preview-row").hidden = !view.session || limited;
+  $("#pure-preview-row").hidden = !view.session;
   $("#pure-preview-toggle").checked = controlsCollapsed;
   $("#favorite-interactions-row").hidden = limited;
   $("#open-performance").hidden = !view.session || limited;
@@ -1522,38 +1522,86 @@ avatarCanvas.onclick = (event) => {
   }
   avatarClick(event);
 };
-let backgroundTap;
+const previewStage = $("#stage");
+const backgroundTapInterval = 450;
+const backgroundTapSlop = 16;
+let backgroundPress, backgroundTap, backgroundClick, previewEdgeTimer;
 function cancelPreviewTouch() {
   endPreviewPress();
-  backgroundTap = null;
+  backgroundPress = backgroundTap = null;
+  clearTimeout(previewEdgeTimer);
 }
-$("#stage").addEventListener("click", (event) => {
-  if (window.sceneLayers?.ignoreGestureClick(event)) {
+function canTapPreviewBackground(event) {
+  return view.session && view.model && $("#loading").hidden && previewStage.contains(event.target) &&
+    !document.documentElement.classList.contains("scene-edit") && !event.target.closest("#caption, #pet-menu, button");
+}
+function hiddenPreviewEdge(clientY) {
+  const root = document.documentElement;
+  if (!root.classList.contains("immersive-preview") || root.classList.contains("scene-edit")) return;
+  const { top, bottom } = previewStage.getBoundingClientRect();
+  const edge = clientY < top + 64 ? "top" : clientY > bottom - 64 ? "bottom" : null;
+  if (edge && root.classList.contains("preview-" + edge + "-hidden")) return edge;
+}
+if (!pet && !wallpaper) {
+  // Android WebView can drop compatibility clicks. Count completed pointer taps instead.
+  document.addEventListener("pointerdown", (event) => {
+    backgroundClick = false;
+    if (!event.isPrimary || event.button !== 0 || !canTapPreviewBackground(event)) {
+      cancelPreviewTouch();
+      return;
+    }
+    clearTimeout(previewEdgeTimer);
+    backgroundPress = { id: event.pointerId, x: event.clientX, y: event.clientY, time: event.timeStamp };
+  }, true);
+  document.addEventListener("pointermove", (event) => {
+    if (backgroundPress?.id === event.pointerId &&
+        Math.hypot(event.clientX - backgroundPress.x, event.clientY - backgroundPress.y) > backgroundTapSlop) {
+      cancelPreviewTouch();
+    }
+  }, true);
+  document.addEventListener("pointercancel", (event) => {
+    if (backgroundPress?.id === event.pointerId) cancelPreviewTouch();
+  }, true);
+  document.addEventListener("pointerup", (event) => {
+    const press = backgroundPress;
+    if (press?.id !== event.pointerId) return;
+    backgroundPress = null;
+    if (event.timeStamp - press.time > 280 ||
+        Math.hypot(event.clientX - press.x, event.clientY - press.y) > backgroundTapSlop || !canTapPreviewBackground(event)) {
+      cancelPreviewTouch();
+      return;
+    }
+    const coordinates = event.target.closest("#canvas") && avatarCoordinates(event);
+    if (coordinates && avatarOpaque(coordinates)) {
+      backgroundTap = null;
+      clearTimeout(previewEdgeTimer);
+      return;
+    }
+    backgroundClick = true;
+    const last = backgroundTap;
+    if (last?.session === view.session && last.collapsed === controlsCollapsed &&
+        press.time - last.time <= backgroundTapInterval && Math.hypot(press.x - last.x, press.y - last.y) <= 42) {
+      backgroundTap = null;
+      setControlsCollapsed(!controlsCollapsed, true);
+      return;
+    }
+    backgroundTap = { x: press.x, y: press.y, time: event.timeStamp, session: view.session, collapsed: controlsCollapsed };
+    const edge = hiddenPreviewEdge(event.clientY);
+    if (edge) {
+      // Keep the edge clear for the second tap before showing the toolbar.
+      previewEdgeTimer = setTimeout(() => revealPreviewControls(edge), backgroundTapInterval);
+    }
+  }, true);
+}
+previewStage.addEventListener("click", (event) => {
+  if ((backgroundClick && event.detail > 0) || window.sceneLayers?.ignoreGestureClick(event)) {
+    backgroundClick = false;
     event.preventDefault();
     event.stopImmediatePropagation();
     return;
   }
-  const root = document.documentElement;
-  if (!pet && !wallpaper && view.model && !view.session.limited && !root.classList.contains("scene-edit")) {
-    const coordinates = event.target.closest("#canvas") && avatarCoordinates(event);
-    const onCharacter = coordinates && (avatarRegion(event) || avatarOpaque(coordinates));
-    const previous = backgroundTap;
-    backgroundTap = null;
-    if (!onCharacter && !event.target.closest("#caption, #pet-menu, button")) {
-      const tap = { x: event.clientX, y: event.clientY, time: event.timeStamp };
-      if (previous && tap.time - previous.time <= 360 && Math.hypot(tap.x - previous.x, tap.y - previous.y) <= 26) {
-        event.preventDefault();
-        event.stopPropagation();
-        setControlsCollapsed(!controlsCollapsed, true);
-        return;
-      }
-      backgroundTap = tap;
-    }
-  } else backgroundTap = null;
-  if (!root.classList.contains("immersive-preview") || root.classList.contains("scene-edit")) return;
-  const { top, bottom } = event.currentTarget.getBoundingClientRect();
-  const edge = event.clientY < top + 64 ? "top" : event.clientY > bottom - 64 ? "bottom" : null;
-  if (!edge || !root.classList.contains("preview-" + edge + "-hidden")) return;
+  const edge = hiddenPreviewEdge(event.clientY);
+  if (!edge) return;
   if (event.target.closest("#canvas") && avatarRegion(event)) return;
   revealPreviewControls(edge);
   event.stopPropagation();
