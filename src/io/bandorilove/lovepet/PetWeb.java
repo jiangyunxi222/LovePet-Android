@@ -1,6 +1,7 @@
 package io.bandorilove.lovepet;
 
 import android.content.Context;
+import android.app.WallpaperManager;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.RectF;
@@ -33,6 +34,7 @@ final class PetWeb {
     private final WallpaperTilt tilt;
     private volatile boolean wallpaperMode;
     private volatile boolean wallpaperPreview;
+    private volatile WallpaperSnapshot wallpaperSnapshot;
     private String lastModelState;
     private boolean wallpaperShown;
     private boolean pageReady;
@@ -135,6 +137,19 @@ final class PetWeb {
             @JavascriptInterface public void changeWallpaper(boolean exit) {
                 if (context instanceof MainActivity) main.post(() -> changeWallpaper.accept(exit));
             }
+            @JavascriptInterface public String captureWallpaperConfig(String model, int costume, String outfit, String scene, String settings) {
+                return context instanceof MainActivity
+                        ? ((MainActivity) context).captureWallpaperConfig(model, costume, outfit, scene, settings) : null;
+            }
+            @JavascriptInterface public boolean prepareWallpaper(String config, String savedPreset) {
+                return context instanceof MainActivity && ((MainActivity) context).prepareWallpaper(config, savedPreset);
+            }
+            @JavascriptInterface public String lastUsedWallpaperPreset() {
+                return context instanceof MainActivity ? WallpaperSnapshot.lastUsedPreset(context) : "";
+            }
+            @JavascriptInterface public boolean updateWallpaperPresetIndex(String index) {
+                return context instanceof MainActivity && ((MainActivity) context).updateWallpaperPresetIndex(index);
+            }
             @JavascriptInterface public void panelLoading(int generation) {
                 if (context instanceof MainActivity) main.post(() -> ((MainActivity) context).panelLoading(generation));
             }
@@ -154,28 +169,35 @@ final class PetWeb {
             }
             @JavascriptInterface public boolean hasWallpaperTilt() { return tilt.available(); }
             @JavascriptInterface public boolean wallpaperTiltEnabled() {
-                return "true".equals(DesktopRuntime.read(context, WallpaperTilt.SETTING));
+                return "true".equals(setting(WallpaperTilt.SETTING));
             }
             @JavascriptInterface public boolean setWallpaperTiltEnabled(boolean enabled) {
                 if (!(context instanceof MainActivity) || !tilt.available()) return false;
                 if (!DesktopRuntime.write(context, WallpaperTilt.SETTING, Boolean.toString(enabled))) return false;
                 main.post(PetWeb.this::updateWallpaperTilt);
-                DesktopRuntime.signal(WallpaperTilt.SETTING);
                 return true;
             }
-            @JavascriptInterface public void setWallpaperTiltPreview(boolean show) {
+            @JavascriptInterface public boolean wallpaperGazeEnabled() {
+                return PetWeb.this.wallpaperGazeEnabled();
+            }
+            @JavascriptInterface public boolean setWallpaperGazeEnabled(boolean enabled) {
+                if (!(context instanceof MainActivity)) return false;
+                return DesktopRuntime.write(context, PetWallpaperService.GAZE_SETTING, Boolean.toString(enabled));
+            }
+            @JavascriptInterface public void setWallpaperTiltPreview(boolean show, boolean enabled) {
                 if (context instanceof MainActivity) main.post(() -> {
-                    previewTilt = show;
+                    previewTilt = show && enabled;
                     updateWallpaperTilt();
                 });
             }
             @JavascriptInterface public String desktopSetting(String key) {
-                return sharedKey(key) ? DesktopRuntime.read(context, key) : null;
+                if (!sharedKey(key)) return null;
+                WallpaperSnapshot snapshot = wallpaperSnapshot;
+                return snapshot != null && WallpaperSnapshot.SCENE_KEY.equals(key) ? snapshot.scene() : setting(key);
             }
             @JavascriptInterface public boolean setDesktopSetting(String key, String value) {
-                if (!(context instanceof MainActivity) || !sharedKey(key) || !DesktopRuntime.write(context, key, value)) return false;
-                if (key.equals("wallpaper-scene-v1")) DesktopRuntime.signal("scene");
-                return true;
+                return context instanceof MainActivity && sharedKey(key) && !WallpaperSnapshot.SCENE_KEY.equals(key)
+                        && DesktopRuntime.write(context, key, value);
             }
             @JavascriptInterface public boolean hasWallpaperMedia(String id) {
                 return context instanceof MainActivity && WallpaperMedia.find(context, id) != null;
@@ -190,9 +212,7 @@ final class PetWeb {
                 return context instanceof MainActivity && mediaWriter.finish();
             }
             @JavascriptInterface public void removeWallpaperMedia(String id) {
-                if (!(context instanceof MainActivity)) return;
-                File file = WallpaperMedia.find(context, id);
-                if (file != null) file.delete();
+                if (context instanceof MainActivity) ((MainActivity) context).removeWallpaperMedia(id);
             }
             @JavascriptInterface public void refreshPermissions() {
                 if (context instanceof MainActivity) main.post(() -> ((MainActivity) context).updatePermissionStatus());
@@ -230,7 +250,7 @@ final class PetWeb {
             @JavascriptInterface public boolean captionCardsEnabled() {
                 return preference("captionCardsEnabled", true);
             }
-            @JavascriptInterface public String theme() { return DesktopRuntime.read(context, "theme"); }
+            @JavascriptInterface public String theme() { return setting("theme"); }
             @JavascriptInterface public String themePalette() { return AppTheme.definitions(context).toString(); }
             @JavascriptInterface public void setTheme(String theme) {
                 if (!(context instanceof MainActivity) || theme == null || !theme.matches("[a-z]{3,12}")) return;
@@ -278,6 +298,8 @@ final class PetWeb {
                 });
             }
             @JavascriptInterface public int costume(String identity) {
+                WallpaperSnapshot snapshot = wallpaperSnapshot;
+                if (snapshot != null) return snapshot.costume();
                 String key = "costume:" + identity;
                 if (identity.matches("[A-Za-z0-9_-]{1,80}")) {
                     String shared = DesktopRuntime.read(context, key);
@@ -285,15 +307,25 @@ final class PetWeb {
                 }
                 return context.getSharedPreferences("player", Context.MODE_PRIVATE).getInt(key, -1);
             }
+            @JavascriptInterface public String wallpaperViewerOutfit() {
+                WallpaperSnapshot snapshot = wallpaperSnapshot;
+                return snapshot == null ? "" : snapshot.outfit();
+            }
         }, "AndroidPet");
     }
 
     private static boolean sharedKey(String key) {
-        return key != null && (key.equals("wallpaper-scene-v1") || key.matches("(?:favorites|performances):[A-Za-z0-9_-]{1,80}"));
+        return key != null && (WallpaperSnapshot.SCENE_KEY.equals(key) || key.matches("(?:favorites|performances):[A-Za-z0-9_-]{1,80}"));
+    }
+
+    private String setting(String key) {
+        WallpaperSnapshot snapshot = wallpaperSnapshot;
+        return wallpaperMode ? (snapshot == null ? null : snapshot.setting(key)) : DesktopRuntime.read(context, key);
     }
 
     private boolean preference(String key, boolean fallback) {
-        String shared = DesktopRuntime.read(context, key);
+        String shared = setting(key);
+        if (wallpaperMode) return shared == null ? fallback : Boolean.parseBoolean(shared);
         return shared == null ? context.getSharedPreferences("player", Context.MODE_PRIVATE).getBoolean(key, fallback)
                 : Boolean.parseBoolean(shared);
     }
@@ -312,6 +344,13 @@ final class PetWeb {
     }
     void load() { view.loadUrl(HOME + (desktop ? "?pet=1" : "")); }
     void loadWallpaper(boolean preview) {
+        WallpaperSnapshot pending = WallpaperSnapshot.pending(context);
+        boolean confirmed = pending != null && !preview && WallpaperRecovery.isApplied(context, WallpaperManager.FLAG_SYSTEM)
+                && WallpaperManager.getInstance(context).getWallpaperId(WallpaperManager.FLAG_SYSTEM) != pending.previousWallpaperId();
+        WallpaperSnapshot snapshot = preview || confirmed ? pending : null;
+        if (snapshot == null) snapshot = WallpaperSnapshot.applied(context);
+        if (snapshot == null && !preview) snapshot = WallpaperSnapshot.pending(context);
+        wallpaperSnapshot = snapshot == null ? WallpaperSnapshot.legacy(context, store) : snapshot;
         wallpaperPreview = preview;
         wallpaperMode = true;
         view.loadUrl(HOME + "?wallpaper=1");
@@ -344,10 +383,11 @@ final class PetWeb {
         updateWallpaperTilt();
     }
     void updateWallpaperTilt() {
-        boolean showing = wallpaperMode ? tiltShowing : context instanceof MainActivity && !paused && previewTilt;
-        boolean enabled = tilt.setEnabled(showing && "true".equals(DesktopRuntime.read(context, WallpaperTilt.SETTING)));
+        boolean enabled = tilt.setEnabled(wallpaperMode ? tiltShowing && "true".equals(setting(WallpaperTilt.SETTING))
+                : context instanceof MainActivity && !paused && previewTilt);
         if (pageReady) evaluate("window.sceneLayers?.setTiltActive(" + enabled + ")");
     }
+    boolean wallpaperGazeEnabled() { return !"false".equals(setting(PetWallpaperService.GAZE_SETTING)); }
     void wallpaperVisible(boolean visible) {
         wallpaperShown = visible;
         if (visible) view.onResume();
@@ -364,11 +404,19 @@ final class PetWeb {
     }
     void resetWallpaperGaze() { evaluate("window.wallpaperGaze?.()"); }
     void refresh() { evaluate("window.refreshModel?.()"); }
+    void openWallpaperEditor() { evaluate("window.sceneLayers?.open()"); }
+    void wallpaperPresetApplied() { evaluate("window.wallpaperPresetApplied?.()"); }
     void reloadWallpaperPanel(long request) {
         evaluate("window.reloadWallpaperPanel?.(" + request + ")");
     }
     void finishWallpaperPanelReload() { evaluate("window.finishWallpaperPanelReload?.()"); }
-    void refreshWallpaperScene() { evaluate("window.sceneLayers?.reloadDesktopScene()"); }
+    void refreshAppliedWallpaper() {
+        WallpaperSnapshot snapshot = WallpaperSnapshot.applied(context);
+        if (snapshot == null || snapshot.sameAs(wallpaperSnapshot)) return;
+        wallpaperSnapshot = snapshot;
+        updateWallpaperTilt();
+        if (pageReady) evaluate("window.reloadAppliedWallpaper?.()");
+    }
     void updateCaptionCards(boolean enabled) { evaluate("window.setCaptionCardsEnabled?.(" + enabled + ")"); }
     void updateTheme() { evaluate("window.refreshAppTheme?.()"); }
     void updateTouchMenu(boolean enabled, boolean thirdParty) {
@@ -376,7 +424,7 @@ final class PetWeb {
     }
     void closeSettings() {
         evaluate("(document.querySelector('#app-prompt[open]') || document.querySelector('#performance-options[open]')"
-                + " || document.querySelector('#permission-config[open], #runtime-diagnostics[open], #app-library[open], #performance-settings[open]')"
+                + " || document.querySelector('#theme-settings[open], #permission-config[open], #runtime-diagnostics[open], #app-library[open], #performance-settings[open]')"
                 + " || document.querySelector('#settings')).close()");
     }
     void modelLibraryResult(int request, String error) {
@@ -469,7 +517,6 @@ final class PetWeb {
             boolean petSound = DesktopRuntime.petVisible();
             if (DesktopRuntime.isDesktop()) {
                 PetService.receive(command, petSound);
-                PetWallpaperService.receive(command, !petSound);
                 DesktopRuntime.command(command, false);
             } else {
                 MainActivity.receive(command, !petSound);
@@ -487,10 +534,18 @@ final class PetWeb {
         String name = path.substring(1);
         try {
             if (name.equals("session")) {
-                File active = store.active();
+                File active = resourceModel();
                 return response("application/json", active == null
                         ? new ByteArrayInputStream("null".getBytes(StandardCharsets.UTF_8))
                         : new FileInputStream(new File(active, "session.json")));
+            }
+            if (name.startsWith("wallpaper-model/") && context instanceof MainActivity) {
+                File model = wallpaperPresetModel(name.substring("wallpaper-model/".length()));
+                return model == null ? missing() : response("application/json", new FileInputStream(new File(model, "session.json")));
+            }
+            if (name.startsWith("model-record/") && context instanceof MainActivity) {
+                File model = store.recordedModel(name.substring("model-record/".length()));
+                return model == null ? missing() : response("application/json", new FileInputStream(new File(model, "session.json")));
             }
             if (wallpaperMode && name.startsWith("wallpaper-media/")) {
                 File media = WallpaperMedia.find(context, name.substring("wallpaper-media/".length()));
@@ -505,11 +560,18 @@ final class PetWeb {
                 return script == null ? missing() : response("text/javascript", new FileInputStream(script));
             }
             if (name.startsWith("media/")) {
-                File active = store.active();
-                if (active == null || !name.startsWith("media/" + active.getName() + "/")) return missing();
-                String asset = ModelStore.safe(name.substring("media/".length() + active.getName().length() + 1));
+                int separator = name.indexOf('/', "media/".length());
+                if (separator < 0) return missing();
+                String id = name.substring("media/".length(), separator);
+                File model = resourceModel();
+                if ((model == null || !model.getName().equals(id)) && context instanceof MainActivity) {
+                    model = store.recordedModel(id);
+                    if (model == null) model = wallpaperPresetModel(id);
+                }
+                if (model == null || !model.getName().equals(id)) return missing();
+                String asset = ModelStore.safe(name.substring(separator + 1));
                 if (!(asset.startsWith("plain/") || asset.startsWith("assets/") || ModelStore.modelJson(asset))) return missing();
-                File file = new File(active, asset);
+                File file = new File(model, asset);
                 return file.isFile() ? response(mime(asset), new FileInputStream(file)) : missing();
             }
             if (name.equals("index.html") || name.equals("app.js") || name.equals("scene.js") || name.equals("library.js")
@@ -525,6 +587,16 @@ final class PetWeb {
             Log.d("BandoriLove", "Resource unavailable: " + name, error);
         }
         return missing();
+    }
+
+    private File resourceModel() {
+        if (!wallpaperMode) return store.active();
+        WallpaperSnapshot snapshot = wallpaperSnapshot;
+        return snapshot == null ? null : store.model(snapshot.model());
+    }
+
+    private File wallpaperPresetModel(String id) {
+        return WallpaperSnapshot.presetModels(context).contains(id) ? store.model(id) : null;
     }
 
     private static WebResourceResponse missing() {

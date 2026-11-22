@@ -94,6 +94,8 @@ final class WallpaperRecovery {
         return liveComponent() == null && preferences.contains("id") && photo.getBaseFile().isFile();
     }
 
+    boolean hasChosenPhoto() { return photo.getBaseFile().isFile(); }
+
     void rememberPhoto(int wallpaperId, Uri uri) throws IOException {
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
@@ -129,7 +131,7 @@ final class WallpaperRecovery {
         try (FileInputStream input = photo.openRead()) {
             int id = manager.setStream(input, null, false, WallpaperManager.FLAG_SYSTEM);
             if (id <= 0) throw new IOException("系统未接受原壁纸图片。");
-            preferences.edit().putInt("id", id).apply();
+            preferences.edit().putInt("id", id).remove("component").apply();
         }
     }
 }

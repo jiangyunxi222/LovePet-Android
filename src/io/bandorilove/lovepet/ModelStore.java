@@ -45,8 +45,16 @@ final class ModelStore {
     File active() {
         String name = DesktopRuntime.isDesktop() ? DesktopRuntime.read(context, "active") : null;
         if (name == null) name = prefs.getString("active", "");
-        File folder = savedFolder(name);
+        return model(name);
+    }
+
+    File model(String id) {
+        File folder = savedFolder(id);
         return folder != null && new File(folder, "session.json").isFile() ? folder : null;
+    }
+
+    File recordedModel(String id) {
+        return prefs.contains("saved:" + id) ? model(id) : null;
     }
 
     String archiveExtension(File model) {
@@ -64,7 +72,7 @@ final class ModelStore {
         return id.matches("[0-9a-f-]{36}") ? new File(models, id) : null;
     }
 
-    private JSONObject savedSession(File folder) throws Exception {
+    JSONObject savedSession(File folder) throws Exception {
         try (InputStream input = new FileInputStream(new File(folder, "session.json"))) {
             return new JSONObject(new String(readBytes(input, JSON_LIMIT), StandardCharsets.UTF_8));
         }
@@ -154,6 +162,13 @@ final class ModelStore {
         if (active) edit.remove("active");
         if (!edit.commit()) throw new IOException("无法删除模型记录");
         if (active) DesktopRuntime.write(context, "active", "");
+        releaseUnusedWallpaperModel(id);
+    }
+
+    synchronized void releaseUnusedWallpaperModel(String id) {
+        File folder = savedFolder(id);
+        if (folder == null || prefs.contains("saved:" + id) || id.equals(prefs.getString("active", ""))
+                || WallpaperSnapshot.keepsModel(context, id)) return;
         delete(folder);
     }
 

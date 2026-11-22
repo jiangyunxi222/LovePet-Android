@@ -40,7 +40,9 @@ import org.json.JSONObject;
 
 import java.lang.ref.WeakReference;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
 
@@ -132,6 +134,7 @@ public final class MainActivity extends Activity {
         active = new WeakReference<>(this);
         store = new ModelStore(this);
         wallpaperRecovery = new WallpaperRecovery(this);
+        restoreWallpaperSnapshot();
         if (getPreferences(MODE_PRIVATE).contains("wallpaperDirectAllowed")) {
             wallpaperDirectAllowed = getPreferences(MODE_PRIVATE).getBoolean("wallpaperDirectAllowed", false);
         }
@@ -407,6 +410,7 @@ public final class MainActivity extends Activity {
         super.onActivityResult(request, result, data);
         if (request == WALLPAPER_PERMISSION_HELP) {
             if (result == RESULT_OK) changeWallpaper(false, true);
+            else discardPreparedWallpaper();
             return;
         }
         if (request >= WALLPAPER_PREVIEW && request <= WALLPAPER_RESTORE_SETTINGS) {
@@ -640,6 +644,104 @@ public final class MainActivity extends Activity {
         changeWallpaper(exit, false);
     }
 
+    String captureWallpaperConfig(String model, int costume, String outfit, String scene, String settings) {
+        synchronized (store) { return WallpaperSnapshot.captureEditor(this, store, model, costume, outfit, scene, settings); }
+    }
+
+    boolean updateWallpaperPresetIndex(String index) {
+        synchronized (store) {
+            try {
+                JSONObject nextIndex = new JSONObject(index);
+                JSONObject previousIndex = WallpaperSnapshot.presetIndex(this);
+                Set<String> next = WallpaperSnapshot.modelIds(nextIndex.getJSONArray("models"));
+                Set<String> previous = WallpaperSnapshot.modelIds(previousIndex.optJSONArray("models"));
+                if (!DesktopRuntime.write(this, WallpaperSnapshot.PRESET_INDEX_KEY, index)) return false;
+                WallpaperSnapshot.dropRemovedPresetSnapshots(this, previousIndex, nextIndex);
+                for (String id : previous) if (!next.contains(id) && !imports.isShutdown()) {
+                    imports.submit(() -> store.releaseUnusedWallpaperModel(id));
+                }
+                return true;
+            } catch (org.json.JSONException error) { return false; }
+        }
+    }
+
+    void removeWallpaperMedia(String id) {
+        synchronized (store) {
+            if (WallpaperSnapshot.keepsMedia(this, id)) return;
+            File file = WallpaperMedia.find(this, id);
+            if (file != null) file.delete();
+        }
+    }
+
+    boolean prepareWallpaper(String configuration, String savedPreset) {
+        synchronized (store) {
+            WallpaperSnapshot previous = WallpaperSnapshot.pending(this);
+            int wallpaperId = WallpaperManager.getInstance(this).getWallpaperId(WallpaperManager.FLAG_SYSTEM);
+            if (!WallpaperSnapshot.stage(this, store, configuration, savedPreset, wallpaperId)) return false;
+            if (previous != null) runOnUiThread(() -> releaseWallpaperResources(previous));
+            return true;
+        }
+    }
+
+    private void restoreWallpaperSnapshot() {
+        boolean applied = hasWallpaper(WallpaperManager.FLAG_SYSTEM);
+        WallpaperSnapshot pending = WallpaperSnapshot.pending(this);
+        if (wallpaperPicker == 0 && !wallpaperApplyAwaitingResult && !DesktopTile.Wallpaper.isQuietChange() && pending != null) {
+            int id = WallpaperManager.getInstance(this).getWallpaperId(WallpaperManager.FLAG_SYSTEM);
+            if (applied && id != pending.previousWallpaperId()) applyPreparedWallpaper();
+            else WallpaperSnapshot.clearPending(this);
+        }
+        if (applied) keepLegacyWallpaper();
+    }
+
+    private void keepLegacyWallpaper() {
+        if (WallpaperSnapshot.applied(this) != null) return;
+        WallpaperSnapshot legacy = WallpaperSnapshot.legacy(this, store);
+        if (legacy != null && legacy.apply(this)) DesktopRuntime.signal(WallpaperSnapshot.APPLIED_KEY);
+    }
+
+    private boolean applyPreparedWallpaper() {
+        WallpaperSnapshot previous;
+        synchronized (store) {
+            WallpaperSnapshot pending = WallpaperSnapshot.pending(this);
+            if (pending == null) return true;
+            previous = WallpaperSnapshot.applied(this);
+            if (!pending.apply(this)) return false;
+            WallpaperSnapshot.clearPending(this);
+        }
+        DesktopRuntime.signal(WallpaperSnapshot.APPLIED_KEY);
+        if (player != null) player.wallpaperPresetApplied();
+        releaseWallpaperResources(previous);
+        return true;
+    }
+
+    private void discardPreparedWallpaper() {
+        WallpaperSnapshot pending;
+        synchronized (store) {
+            pending = WallpaperSnapshot.pending(this);
+            if (pending == null) return;
+            WallpaperSnapshot.clearPending(this);
+        }
+        releaseWallpaperResources(pending);
+    }
+
+    private void releaseWallpaperResources(WallpaperSnapshot previous) {
+        if (previous == null || frame == null) return;
+        frame.postDelayed(() -> {
+            if (imports.isShutdown()) return;
+            imports.submit(() -> {
+                synchronized (store) {
+                    store.releaseUnusedWallpaperModel(previous.model());
+                    for (String id : previous.media()) {
+                        if (WallpaperSnapshot.keepsMedia(this, id)) continue;
+                        File media = WallpaperMedia.find(this, id);
+                        if (media != null) media.delete();
+                    }
+                }
+            });
+        }, 5_000);
+    }
+
     private void changeWallpaper(boolean exit, boolean preferList) {
         if (externalPicker || wallpaperChanging || isFinishing()) {
             updateWallpaperStatus();
@@ -651,9 +753,10 @@ public final class MainActivity extends Activity {
             if (applied) exitWallpaper();
             return;
         }
-        if (store.active() == null) {
+        if (WallpaperSnapshot.pending(this) == null) {
             updateWallpaperStatus();
-            wallpaperMessage("请先导入模型。");
+            if (preferList && player != null && store.active() != null) player.runWallpaperTileAction(false);
+            else wallpaperMessage("请先导入模型。");
             return;
         }
         WallpaperManager manager = WallpaperManager.getInstance(this);
@@ -663,7 +766,6 @@ public final class MainActivity extends Activity {
         boolean supported = manager.isWallpaperSupported();
         boolean allowed = supported && manager.isSetWallpaperAllowed();
         if (applied && allowed && Boolean.TRUE.equals(wallpaperDirectAllowed) && !wallpaperDirectNeedsCheck) {
-            // The editor has already published its scene to the independent desktop process.
             wallpaperChanging = false;
             updateWallpaperStatus();
             updatePermissionStatus();
@@ -965,6 +1067,10 @@ public final class MainActivity extends Activity {
 
     void updateWallpaperStatus() {
         boolean applied = hasWallpaper(WallpaperManager.FLAG_SYSTEM);
+        if (DesktopTile.Wallpaper.isQuietChange()) {
+            publishWallpaperStatus(applied);
+            return;
+        }
         boolean idle = !wallpaperChanging && !externalPicker && !wallpaperApplyAwaitingResult;
         boolean changedOutsidePicker = idle && wallpaperObserved != null && wallpaperObserved != applied;
         publishWallpaperStatus(applied);
@@ -992,6 +1098,13 @@ public final class MainActivity extends Activity {
     }
 
     private void completeWallpaperApply() {
+        if (wallpaperApplyAwaitingResult && !applyPreparedWallpaper()) {
+            wallpaperApplyAwaitingResult = false;
+            wallpaperMessage("无法保存壁纸配置，请检查可用存储空间后重试。");
+            presentWallpaperResult();
+            return;
+        }
+        keepLegacyWallpaper();
         RuntimeDiagnostics.event(this, RuntimeDiagnostics.Area.WALLPAPER_CHANGE, "壁纸已应用");
         wallpaperApplyAwaitingResult = false;
         wallpaperRecovery.acknowledgeExit();
@@ -1158,7 +1271,10 @@ public final class MainActivity extends Activity {
                 (wanted ? "应用壁纸" : "退出壁纸") + (confirmed ? "未通过系统状态验证" : "未完成"));
         if (!wanted) wallpaperRecovery.cancelExit();
         if (player == null || !confirmed) {
-            if (wanted) wallpaperApplyAwaitingResult = false;
+            if (wanted) {
+                wallpaperApplyAwaitingResult = false;
+                discardPreparedWallpaper();
+            }
             presentWallpaperResult();
             fadeStartupCover();
             return;
@@ -1236,7 +1352,16 @@ public final class MainActivity extends Activity {
             player.notice(store.active() == null ? "请先导入模型" : "请等待模型加载完成后重试");
             return;
         }
-        player.runWallpaperTileAction(exit);
+        if (exit) player.runWallpaperTileAction(true);
+        else player.openWallpaperEditor();
+    }
+
+    static void refreshFromWallpaperTile() {
+        MainActivity current = active.get();
+        if (current != null && !current.isDestroyed()) {
+            current.updateWallpaperStatus();
+            if (current.player != null) current.player.wallpaperPresetApplied();
+        }
     }
 
     static void petChanged() {

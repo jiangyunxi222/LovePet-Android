@@ -47,12 +47,18 @@
     color.style.setProperty("--sample-tint", tint);
     button.append(color, document.createTextNode(name));
     button.onclick = () => {
-      window.AndroidPet.setTheme(id);
-      apply(id);
+      if (root.dataset.theme === id) return;
+      transitionPanel(() => {
+        window.AndroidPet.setTheme(id);
+        apply(id);
+      });
     };
     grid.append(button);
   }
-  window.refreshAppTheme = () => apply(window.AndroidPet.theme());
+  window.refreshAppTheme = () => {
+    const wallpaperTheme = window.sceneLayers?.wallpaperTheme;
+    apply(wallpaperTheme === undefined ? window.AndroidPet.theme() : wallpaperTheme);
+  };
   window.refreshAppTheme();
   entry.onclick = () => dialog.showModal();
   document.querySelector("#theme-close").onclick = () => dialog.close();

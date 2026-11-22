@@ -189,6 +189,16 @@
             ? point.x >= box[0] && point.x <= box[2] && point.y >= box[1] && point.y <= box[3]
             : names.includes(name))?.id;
         },
+        touchBoxes(model) {
+          const internal = model.internalModel;
+          return routes.flatMap(({ name, box }) => {
+            if (box) return [{ box, normalized: selected.modern && Boolean(overlay) }];
+            const drawable = internal.hitAreas[name]?.index;
+            if (overlay || !Number.isInteger(drawable)) return [];
+            const { x, y, width, height } = internal.getDrawableBounds(drawable);
+            return [{ box: [x, y, x + width, y + height] }];
+          });
+        },
         choose(region) {
           const candidates = choices.get(region ?? "") || [];
           return candidates[Math.floor(Math.random() * candidates.length)];
@@ -198,7 +208,7 @@
       prepared.set(key, result);
       return result;
     }
-    return { initial: descriptor.initial, prepare };
+    return { select: key => visible(graph.get(key)) ? key : descriptor.initial, prepare };
   }
 
   window.viewerInteraction = { load };

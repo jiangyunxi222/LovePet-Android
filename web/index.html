@@ -38,7 +38,6 @@
       <div class="welcome-card">
         <img src="/favicon.svg" alt="">
         <h1>导入模型</h1>
-        <p>请选择 BandoriLove 单角色 ZIP，或导入第三方 LPK、WPK 模型。</p>
         <div class="welcome-actions">
           <button id="choose">选择模型</button>
           <button id="welcome-models">模型记录</button>
@@ -49,7 +48,7 @@
     <p id="status" role="status" hidden></p>
     <section id="player" hidden>
       <div class="title-row">
-        <div><p id="source"></p><h1 id="name"></h1></div>
+        <div class="character-heading"><p id="source"></p><h1 id="name"></h1></div>
         <div class="pet-actions" role="group" aria-label="预览开关">
           <button id="toggle" type="button" aria-label="桌宠" aria-pressed="false" disabled>
             <svg aria-hidden="true" width="21" height="21" viewBox="0 0 24 24">
@@ -70,6 +69,7 @@
       <div id="stage">
         <div id="scene-layers" aria-hidden="true"></div>
         <div id="canvas" aria-label="Live2D 模型预览"></div>
+        <canvas id="scene-touch-frames" aria-hidden="true" hidden></canvas>
         <p id="loading" role="status" hidden>正在加载模型…</p>
         <p id="caption" hidden></p>
       </div>
@@ -301,22 +301,32 @@
         </div>
       </fieldset>
       </details>
-      <details class="scene-section" id="scene-motion-section">
-        <summary>背景微动</summary>
-        <label class="settings-switch">
-          <strong>陀螺仪</strong>
-          <input type="checkbox" id="scene-tilt" role="switch">
-          <span class="switch-track" aria-hidden="true"></span>
-        </label>
-      </details>
       <details class="scene-section" id="scene-library-section">
         <summary>壁纸配置</summary>
-        <div class="scene-add">
-          <button id="scene-save-preset">保存当前配置</button>
-          <button id="scene-open-presets">已保存的壁纸</button>
+        <div class="scene-config-options">
+          <label class="settings-switch">
+            <strong>背景微动</strong>
+            <input type="checkbox" id="scene-tilt" role="switch">
+            <span class="switch-track" aria-hidden="true"></span>
+          </label>
+          <label class="settings-switch">
+            <strong>视线跟随</strong>
+            <input type="checkbox" id="scene-gaze" role="switch">
+            <span class="switch-track" aria-hidden="true"></span>
+          </label>
+          <label class="settings-switch">
+            <strong>触控边框</strong>
+            <input type="checkbox" id="scene-show-touch-frames" role="switch">
+            <span class="switch-track" aria-hidden="true"></span>
+          </label>
         </div>
       </details>
       <p id="scene-message" role="status" hidden></p>
+      </div>
+      <div class="scene-preset-actions">
+        <button id="scene-save-preset" aria-label="保存当前配置"><span aria-hidden="true">保存当前配置</span></button>
+        <button id="scene-open-presets">已保存的壁纸</button>
+        <span id="scene-save-status" role="status"></span>
       </div>
       <button id="scene-apply" class="primary">应用壁纸</button>
     </div>

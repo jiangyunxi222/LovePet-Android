@@ -9,6 +9,10 @@ let wallpaperFrameTimer;
 const names = { action: "动作", expression: "表情", costume: "衣装", voice: "语音" };
 const view = { session: null, costume: null, model: null, app: null, generation: 0, tab: "action" };
 const caption = $("#caption");
+const sceneTouchFrames = $("#scene-touch-frames");
+const sceneTouchToggle = $("#scene-show-touch-frames");
+const avatarTouchRegions = ["menu", "expression", "voice", "left", "right", "body", "wardrobe"];
+let sceneTouchColor;
 let captionCardsEnabled = native.captionCardsEnabled();
 let touchMenuEnabled = native.touchMenuEnabled();
 let thirdPartyMenuEnabled = native.thirdPartyMenuEnabled();
@@ -20,6 +24,7 @@ const appPrompt = $("#app-prompt");
 let promptId, promptCallback, noticeTimer;
 let panelLoadSequence = 0;
 let wallpaperPanelReloading = false;
+let wallpaperEditorPreset;
 let desktopCrop;
 let desktopModelScale = 1, desktopRasterScale = 1;
 let desktopRotation = 0;
@@ -39,6 +44,7 @@ let showFavorites = false;
 let overlayVisible = false;
 let controlsCollapsed = localStorage.getItem("controlsCollapsed") === "true";
 let controlsTransition;
+let panelTransition;
 let busy = false;
 let wallpaperApplied = false;
 let wallpaperChanging = false;
@@ -64,7 +70,8 @@ if (pet) {
   desktopRotation = native.desktopRotation();
 }
 
-const asset = (path, base = "/media/" + view.session.version + "/") =>
+const modelBase = session => "/media/" + session.version + "/";
+const asset = (path, base = modelBase(view.session)) =>
   new URL(path.split("/").map(encodeURIComponent).join("/"), location.origin + base).href;
 
 async function data(url) {
@@ -182,7 +189,7 @@ function updateControlsVisibility() {
 }
 
 function setControlsCollapsed(collapsed, animate = false) {
-  if (controlsCollapsed === collapsed || controlsTransition) return;
+  if (controlsCollapsed === collapsed || controlsTransition || panelTransition) return;
   const apply = () => {
     controlsCollapsed = collapsed;
     localStorage.setItem("controlsCollapsed", String(collapsed));
@@ -206,6 +213,34 @@ function setControlsCollapsed(collapsed, animate = false) {
     controlsTransition = null;
     root.classList.remove("preview-transition");
   });
+}
+
+function transitionPanel(update, afterFrame) {
+  if (pet || wallpaper || document.hidden || controlsTransition ||
+      matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    update();
+    return;
+  }
+  if (!document.startViewTransition) {
+    update();
+    if (view.model) $("#stage").animate([{opacity: .78}, {opacity: 1}], {duration: 180, easing: "ease-out"});
+    return;
+  }
+  panelTransition?.skipTransition();
+  const root = document.documentElement;
+  root.classList.add("panel-transition");
+  const pending = document.startViewTransition(() => {
+    update();
+    return afterFrame?.();
+  });
+  panelTransition = pending;
+  pending.ready.catch(() => {});
+  pending.finished.catch(() => {}).finally(() => {
+    if (panelTransition !== pending) return;
+    panelTransition = null;
+    root.classList.remove("panel-transition");
+  });
+  return pending.updateCallbackDone;
 }
 
 function revealPreviewControls(edge) {
@@ -241,20 +276,27 @@ function finishPanelLoad(ticket, ready) {
   });
 }
 
-async function refreshModel() {
+function clearPlayer() {
+  cancelPlayback();
+  ++view.generation;
+  for (const model of view.app?.stage.removeChildren() || []) model.destroy({ children: true });
+  view.session = view.model = view.costume = null;
+  $("#player").hidden = $("#replace").hidden = true;
+  $("#welcome").hidden = false;
+  updateControlsVisibility();
+}
+
+async function refreshModel(present) {
   const ticket = beginPanelLoad();
   let ready = false;
   try {
-    const session = await data("/session");
+    const preset = wallpaperEditorPreset;
+    const session = await data(preset ? "/wallpaper-model/" + encodeURIComponent(preset.model) : "/session");
     if (!session) {
-      cancelPlayback();
-      ++view.generation;
-      for (const model of view.app?.stage.removeChildren() || []) model.destroy({ children: true });
-      view.session = view.model = view.costume = null;
+      if (preset) return false;
+      if (present) await present(clearPlayer);
+      else clearPlayer();
       native.reportModelRendering?.("empty");
-      $("#player").hidden = $("#replace").hidden = true;
-      $("#welcome").hidden = false;
-      updateControlsVisibility();
       importProgress(false);
       ready = true;
       return true;
@@ -262,7 +304,7 @@ async function refreshModel() {
     cancelPlayback();
     view.session = session;
     view.viewer = session.viewerPackage ? await window.viewerInteraction.load(asset("plain/viewer.json")) : null;
-    view.viewerOutfit = view.viewer?.initial;
+    view.viewerOutfit = view.viewer?.select(wallpaper ? native.wallpaperViewerOutfit() : preset?.outfit);
     view.viewerCostume = null;
     showFavorites = false;
     const catalog = session.catalog;
@@ -281,11 +323,11 @@ async function refreshModel() {
       button.hidden = session.limited;
     });
     title(catalog.name);
-    const savedCostume = native.costume(catalog.id || "");
+    const savedCostume = preset?.costume ?? native.costume(catalog.id || "");
     const selected = catalog.costumes.find((item) => item.id === savedCostume || item.aliasIds?.includes(savedCostume));
     setTab("action");
-    ready = await selectCostume(selected || catalog.costumes[0]);
-    window.modelPreviewChanged?.();
+    ready = await selectCostume(selected || catalog.costumes[0], present);
+    if (ready && !preset) window.cacheModelPreview?.(session.version, session).catch(console.error);
     updateThirdPartyMenuButton();
     updateTouchMenuSetting();
     importProgress(false);
@@ -307,7 +349,7 @@ window.reloadWallpaperPanel = async (request) => {
   let ready = false;
   try {
     await costumeChange?.catch(() => {});
-    ready = view.costume ? await selectCostume(view.costume) : await refreshModel();
+    ready = await refreshModel();
   } catch (error) {
     reportError(error.message);
     console.error(error);
@@ -320,8 +362,8 @@ window.finishWallpaperPanelReload = () => {
   armLoops();
 };
 
-function preview(raw, costume, file) {
-  if (view.session.limited) {
+function preview(raw, costume, file, session) {
+  if (session.limited) {
     const refs = raw.FileReferences || raw;
     const prefix = file.substring(0, file.lastIndexOf("/") + 1);
     const path = (key) => { if (refs[key]) refs[key] = new URL(refs[key].split("/").map(encodeURIComponent).join("/"), prefix).href; };
@@ -338,44 +380,50 @@ function preview(raw, costume, file) {
   const textureKey = key("Textures", "textures");
   const mocKey = key("Moc", "model");
   const fileKey = key("File", "file");
+  const modelAsset = path => asset(path, modelBase(session));
   const textures = refs[textureKey].slice();
   for (const [, index, replacement] of (startup?.[key("PostCommand", "post_command")] || "")
     .matchAll(/replace_tex (\d+) ([^;\s]+)/g)) {
     if (textures[index] !== undefined) textures[index] = replacement;
   }
   const motions = {};
-  const sourceFades = view.session.catalog.motionFadePolicy === "source";
+  const sourceFades = session.catalog.motionFadePolicy === "source";
   const fade = (item) => sourceFades ? {
     [key("FadeInTime", "fade_in")]: item.fadeIn / (modern ? 1000 : 1),
     [key("FadeOutTime", "fade_out")]: item.fadeOut / (modern ? 1000 : 1),
   } : {};
   for (const item of costume.actions || []) {
-    motions["page_" + item.id] = [{ [fileKey]: asset(item.file), ...fade(item) }];
+    motions["page_" + item.id] = [{ [fileKey]: modelAsset(item.file), ...fade(item) }];
   }
   const idle = key("Idle", "idle");
-  if (groups[idle]?.[0]?.[fileKey]) motions[idle] = [{ [fileKey]: asset(groups[idle][0][fileKey]) }];
+  if (groups[idle]?.[0]?.[fileKey]) motions[idle] = [{ [fileKey]: modelAsset(groups[idle][0][fileKey]) }];
   const expressions = (costume.expressions || []).filter((item) => item.file).map((item) =>
-    ({ [key("Name", "name")]: String(item.id), [fileKey]: asset(item.file) }));
+    ({ [key("Name", "name")]: String(item.id), [fileKey]: modelAsset(item.file) }));
   const normalized = {
-    [mocKey]: asset(refs[mocKey]),
-    [textureKey]: textures.map((path) => asset(path)),
+    [mocKey]: modelAsset(refs[mocKey]),
+    [textureKey]: textures.map(modelAsset),
     [key("Motions", "motions")]: motions,
     [key("Expressions", "expressions")]: expressions,
   };
   for (const field of [key("Physics", "physics"), key("Pose", "pose")]) {
-    if (refs[field]) normalized[field] = asset(refs[field]);
+    if (refs[field]) normalized[field] = modelAsset(refs[field]);
   }
   return modern ? { Version: 3, FileReferences: normalized } : { version: "Live2DViewerEX", ...normalized };
 }
 
-function makeRenderer() {
-  const stage = $("#canvas");
-  const canvas = document.createElement("canvas");
+function makeWebGLContext(canvas) {
   const attributes = { alpha: true, stencil: true, antialias: true, preserveDrawingBuffer: true };
   const context = canvas.getContext("webgl2", attributes)
     || canvas.getContext("webgl", attributes)
     || canvas.getContext("webgl", { ...attributes, antialias: false });
   if (!context) throw new Error("此设备的 Android WebView 无法创建 WebGL 画布");
+  return context;
+}
+
+function makeRenderer() {
+  const stage = $("#canvas");
+  const canvas = document.createElement("canvas");
+  const context = makeWebGLContext(canvas);
   const maxSide = Math.min(context.getParameter(context.MAX_RENDERBUFFER_SIZE), context.getParameter(context.MAX_TEXTURE_SIZE));
   const [maxWidth, maxHeight] = Array.from(context.getParameter(context.MAX_VIEWPORT_DIMS), value => Math.min(value, maxSide));
   const anisotropy = context.getExtension("EXT_texture_filter_anisotropic");
@@ -415,6 +463,7 @@ function makeRenderer() {
       placeModel();
     } else if (pet && desktopMoving) return;
     renderer.render(contents);
+    if (!sceneTouchFrames.hidden) drawSceneTouchFrames(renderer.screen);
     if (sampleTouchMask && overlayVisible && view.model && !desktopMoving) {
       sampleTouchMask(view.model, refreshTouchMask);
       refreshTouchMask = false;
@@ -616,12 +665,17 @@ function placeModel() {
     view.model.position.set(centerX + width * offsetX + (dx * cos - dy * sin) * adjustedZoom,
       centerY + height * offsetY + (dx * sin + dy * cos) * adjustedZoom);
     if (!fitVisible) {
-      view.app.renderer.render(view.app.stage);
-      // A saved wallpaper pose can move the entire character outside the panel.
-      if (!hasVisibleModelPixels()) {
+      // The panel anchors the model at its feet. Check its center, since a cropped edge can still contain opaque pixels.
+      const halfHeight = bounds.height * view.model.scale.x / 2;
+      const modelX = view.model.position.x + halfHeight * sin;
+      const modelY = view.model.position.y - halfHeight * cos;
+      const centered = modelX >= 0 && modelX <= width && modelY >= 0 && modelY <= height;
+      if (centered) view.app.renderer.render(view.app.stage);
+      if (!centered || !hasVisibleModelPixels()) {
         view.model.scale.set(scale);
         view.model.angle = 0;
         view.model.position.set(x, y);
+        view.app.renderer.render(view.app.stage);
       }
     }
   }
@@ -660,45 +714,59 @@ function motionFades(model, metadata) {
   });
 }
 
-async function selectCostume(costume) {
+async function loadCostumeAssets(session, costume, viewer, outfit) {
+  const packed = await viewer?.prepare(outfit);
+  await loadEngine(!(packed?.modern ?? costume.cubism3));
+  const file = asset(costume.file, modelBase(session));
+  const raw = packed?.metadata || await data(file);
+  const metadata = packed?.metadata || preview(raw, costume, file, session);
+  if (!packed) metadata.url = file;
+  return { packed, raw, metadata };
+}
+
+async function selectCostume(costume, present) {
   const ticket = beginPanelLoad();
   let ready = false;
   const generation = ++view.generation;
   $("#loading").hidden = false;
   try {
-    const packed = await view.viewer?.prepare(view.viewerOutfit);
-    await loadEngine(!(packed?.modern ?? costume.cubism3));
-    const file = asset(costume.file);
-    const raw = packed?.metadata || await data(file);
-    const metadata = packed?.metadata || preview(raw, costume, file);
-    if (!packed) metadata.url = file;
+    const { packed, raw, metadata } = await loadCostumeAssets(view.session, costume, view.viewer, view.viewerOutfit);
     if (!view.app) view.app = makeRenderer();
     const next = await PIXI.live2d.Live2DModel.from(metadata, { autoInteract: false, motionPreload: "NONE" });
     if (generation !== view.generation) {
       next.destroy({ children: true });
       return false;
     }
-    view.app.prepareModel(next);
-    const outgoing = view.app.stage.removeChildren();
-    view.model = next;
-    view.viewerCostume = packed;
-    view.visibleFit = null;
-    view.costume = costume;
-    view.bounds = next.getLocalBounds();
-    const controllers = raw[raw.FileReferences ? "Controllers" : "controllers"];
-    const sync = controllers?.[raw.FileReferences ? "LipSync" : "lip_sync"];
-    const targets = metadata.pageMouthIds || (sync?.Items || sync?.items || []).map((item) => item.Id || item.id);
-    next.internalModel.on("beforeModelUpdate", () => moveMouth(next, targets));
-    if (!packed) motionFades(next, metadata);
-    view.app.stage.addChild(next);
-    placeModel();
-    view.app.renderer.render(view.app.stage);
-    for (const model of outgoing) model.destroy({ children: true });
-    renderItems();
-    updateWallpaperButton();
-    scheduleWallpaperFrame();
-    ready = true;
-    return true;
+    const showModel = () => {
+      if (generation !== view.generation) return false;
+      view.app.prepareModel(next);
+      const outgoing = view.app.stage.removeChildren();
+      view.model = next;
+      view.viewerCostume = packed;
+      view.visibleFit = null;
+      view.costume = costume;
+      view.bounds = next.getLocalBounds();
+      const controllers = raw[raw.FileReferences ? "Controllers" : "controllers"];
+      const sync = controllers?.[raw.FileReferences ? "LipSync" : "lip_sync"];
+      const targets = metadata.pageMouthIds || (sync?.Items || sync?.items || []).map((item) => item.Id || item.id);
+      next.internalModel.on("beforeModelUpdate", () => moveMouth(next, targets));
+      if (!packed) motionFades(next, metadata);
+      view.app.stage.addChild(next);
+      placeModel();
+      view.app.renderer.render(view.app.stage);
+      for (const model of outgoing) model.destroy({ children: true });
+      $("#loading").hidden = true;
+      renderItems();
+      updateWallpaperButton();
+      scheduleWallpaperFrame();
+      ready = true;
+      return true;
+    };
+    if (present) await present(showModel);
+    else if (view.model) await transitionPanel(showModel);
+    else showModel();
+    if (!ready) next.destroy({ children: true });
+    return ready;
   } finally {
     if (generation === view.generation) {
       $("#loading").hidden = true;
@@ -759,7 +827,7 @@ function renderItems() {
   updateLoops();
 }
 
-function setTab(tab) {
+function setTab(tab, animate = false) {
   view.tab = tab;
   $("#filter").value = "";
   $("#filter").placeholder = "搜索" + names[tab];
@@ -768,6 +836,13 @@ function setTab(tab) {
   $("#favorites").setAttribute("aria-pressed", String(showFavorites));
   $("#favorites").textContent = showFavorites ? "♥" : "♡";
   renderItems();
+  if (animate && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    for (const element of [$("#items"), $("#empty")]) {
+      element.getAnimations().forEach(animation => animation.cancel());
+      if (!element.hidden) element.animate([{opacity: .45, translate: "0 3px"}, {opacity: 1, translate: "0 0"}],
+        {duration: 150, easing: "ease-out"});
+    }
+  }
 }
 
 function readFavoriteIds() {
@@ -780,7 +855,7 @@ function isFavorite(item, favorites) {
 
 function readDesktopSetting(key) {
   const shared = native.desktopSetting(key);
-  if (shared !== null) return shared;
+  if (shared !== null || wallpaper) return shared;
   const legacy = localStorage.getItem(key);
   if (legacy !== null && !pet && !wallpaper && key !== "wallpaper-scene-v1") native.setDesktopSetting(key, legacy);
   return legacy;
@@ -800,13 +875,19 @@ function updateLoops() {
 function send(type, id = 0, kind = "", loop) {
   if (!view.session || view.session.limited) return;
   const outfit = type === "action" || type === "expression" ? view.costume?.id : undefined;
-  native.command(JSON.stringify({ type, id, kind, role: view.session.catalog.id, outfit, loop }));
+  const command = { type, id, kind, role: view.session.catalog.id, outfit, loop };
+  if (wallpaper || wallpaperEditorPreset) receiveCommand(command, true);
+  else native.command(JSON.stringify(command));
 }
 
 function ownsPlayback() {
   if (pet) return overlayVisible;
-  if (wallpaper) return wallpaperPlaybackActive && !overlayVisible;
-  return panelPlaybackActive && !wallpaperPanelReloading && !document.hidden && !overlayVisible;
+  if (wallpaper) return wallpaperPlaybackActive;
+  return panelPlaybackActive && !wallpaperPanelReloading && !viewingSavedWallpaper() && !document.hidden && !overlayVisible;
+}
+
+function viewingSavedWallpaper() {
+  return Boolean(wallpaperEditorPreset || window.sceneLayers?.savedPreviewOpen);
 }
 
 function updateLoopOwner() {
@@ -1114,7 +1195,7 @@ async function changePlaybackCostume(item, session) {
 }
 
 async function receiveCommand(command, sound) {
-  if (!view.session || view.session.catalog.id !== command.role) return;
+  if (!view.session || view.session.catalog.id !== command.role || (viewingSavedWallpaper() && command.type !== "loop")) return;
   const session = view.session;
   const generation = playbackGeneration;
   const { type, id, kind, outfit, loop } = command;
@@ -1271,7 +1352,7 @@ function avatarRegion(event) {
   }
   const regions = view.costume.hitRegions || {};
   const contains = (box) => box && point.x >= box[0] && point.x <= box[2] && point.y >= box[1] && point.y <= box[3];
-  const region = ["menu", "expression", "voice", "left", "right", "body", "wardrobe"].find((name) => contains(regions[name]));
+  const region = avatarTouchRegions.find((name) => contains(regions[name]));
   if (region || !view.costume.cubism3) return region;
 
   // Instruments and wide costumes can extend past the authored rectangles.
@@ -1282,6 +1363,61 @@ function avatarRegion(event) {
     return name === "menu" || (name === "left" ? point.x > box[2] : point.x < box[0]);
   });
   if (band && avatarOpaque(coordinates)) return band;
+}
+
+function sceneTouchBoxes() {
+  if (!view.model || !view.costume) return [];
+  const regions = view.costume.hitRegions || {};
+  const boxes = view.viewerCostume ? view.viewerCostume.touchBoxes(view.model)
+    : avatarTouchRegions.map(id => ({ box: regions[id], normalized: view.costume.cubism3 }));
+  return boxes.filter(({ box }) => Array.isArray(box) && box.length === 4 && box.every(Number.isFinite) &&
+    box[0] < box[2] && box[1] < box[3]);
+}
+
+function updateSceneTouchFrames() {
+  const enabled = !pet && !wallpaper && sceneTouchToggle.checked && document.documentElement.classList.contains("scene-edit");
+  if (enabled) sceneTouchColor = getComputedStyle(sceneTouchFrames).color;
+  sceneTouchFrames.hidden = !enabled;
+}
+
+function drawSceneTouchFrames({ width, height }) {
+  if (!width || !height) return;
+  const density = Math.min(devicePixelRatio || 1, 2);
+  const pixels = [Math.round(width * density), Math.round(height * density)];
+  if (sceneTouchFrames.width !== pixels[0] || sceneTouchFrames.height !== pixels[1]) {
+    [sceneTouchFrames.width, sceneTouchFrames.height] = pixels;
+  }
+  const context = sceneTouchFrames.getContext("2d");
+  if (!context) return;
+  context.setTransform(pixels[0] / width, 0, 0, pixels[1] / height, 0, 0);
+  context.clearRect(0, 0, width, height);
+  if (!view.model || !$("#loading").hidden || $("#canvas").style.pointerEvents === "none") return;
+
+  const { internalModel, worldTransform } = view.model;
+  const point = new PIXI.Point();
+  context.lineJoin = "round";
+  for (const { box, normalized } of sceneTouchBoxes()) {
+    const [left, top, right, bottom] = box;
+    const corners = [[left, top], [right, top], [right, bottom], [left, bottom]].map(([x, y]) => {
+      point.set(normalized ? x * internalModel.pixelsPerUnit + internalModel.originalWidth / 2 : x,
+        normalized ? y * internalModel.pixelsPerUnit + internalModel.originalHeight / 2 : y);
+      // Reverse the same transforms that toModelPosition uses for touch input.
+      internalModel.localTransform.apply(point, point);
+      return worldTransform.apply(point);
+    });
+    if (corners.every(point => point.x < 0) || corners.every(point => point.x >= width) ||
+        corners.every(point => point.y < 0) || corners.every(point => point.y >= height)) continue;
+    context.beginPath();
+    context.moveTo(corners[0].x, corners[0].y);
+    for (const corner of corners.slice(1)) context.lineTo(corner.x, corner.y);
+    context.closePath();
+    context.strokeStyle = "rgba(255,255,255,.9)";
+    context.lineWidth = 3;
+    context.stroke();
+    context.strokeStyle = sceneTouchColor;
+    context.lineWidth = 1.4;
+    context.stroke();
+  }
 }
 
 async function playViewerAction(action) {
@@ -1297,7 +1433,7 @@ async function playViewerAction(action) {
 }
 
 function avatarClick(event) {
-  if (!view.model || !$("#loading").hidden) return;
+  if (viewingSavedWallpaper() || !view.model || !$("#loading").hidden) return;
   const region = avatarRegion(event);
   if (view.session.limited) {
     const coordinates = avatarCoordinates(event);
@@ -1374,14 +1510,75 @@ permissions.querySelectorAll("[data-permission]").forEach(control => {
   control.onclick = () => native.openPermission(control.dataset.permission);
 });
 const diagnostics = $("#runtime-diagnostics");
+const diagnosticStates = new Map([
+  ["已开启", "active"], ["已显示", "active"], ["运行中", "active"], ["已应用", "active"], ["就绪", "active"],
+  ["未开启", "inactive"], ["未显示", "inactive"], ["未运行", "inactive"], ["未应用", "inactive"], ["暂无记录", "inactive"],
+]);
+
+function renderDiagnosticSection(content) {
+  const [heading, ...lines] = content.split("\n");
+  const section = document.createElement("section");
+  const title = document.createElement("h3");
+  title.textContent = heading;
+  section.append(title);
+  const fields = document.createElement("dl");
+  let record;
+  for (const line of lines) {
+    const separator = line.indexOf("  ");
+    const label = separator < 0 ? "" : line.slice(0, separator);
+    const value = separator < 0 ? line : line.slice(separator + 2);
+    if (heading === "系统进程退出记录") {
+      if (label === "应用主进程" || label === "桌宠与壁纸进程") {
+        record = document.createElement("article");
+        const meta = document.createElement("div");
+        const process = document.createElement("strong");
+        const time = document.createElement("span");
+        meta.className = "diagnostics-exit-meta";
+        process.textContent = label;
+        time.textContent = value;
+        meta.append(process, time);
+        record.append(meta);
+        section.append(record);
+      } else {
+        const detail = document.createElement("p");
+        detail.textContent = label === "退出前状态" ? `${label}　${value}` : line;
+        (record || section).append(detail);
+      }
+    } else if (label) {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = value;
+      const state = diagnosticStates.get(value);
+      if (state) detail.dataset.state = state;
+      row.classList.toggle("diagnostics-wide", value.length > 32 || label.length > 8 || /^\d{2}-\d{2} \d{2}:\d{2}:\d{2} /.test(value));
+      row.append(term, detail);
+      fields.append(row);
+    } else if (value) {
+      const detail = document.createElement("p");
+      detail.textContent = value;
+      section.append(detail);
+    }
+  }
+  if (fields.childElementCount) section.append(fields);
+  return section;
+}
+
 $("#open-diagnostics").onclick = () => {
   const report = diagnostics.querySelector(".diagnostics-report");
   const sections = native.runtimeDiagnostics().split("\n\n");
+  const scene = window.sceneLayers;
+  const classes = document.documentElement.classList;
+  const panelMode = scene?.savedPreviewOpen ? "已保存壁纸预览（只读）" : classes.contains("scene-edit")
+    ? "壁纸设置" : classes.contains("immersive-preview") ? "纯享" : "控制面板";
+  const menuEnabled = view.session?.limited ? thirdPartyMenuEnabled : touchMenuEnabled;
   const playback = ["当前面板与播放",
     "模型  " + (!$("#loading").hidden ? "加载中" : view.model ? "已显示" : "未显示"),
-    "当前视图  " + (document.documentElement.classList.contains("immersive-preview") ? "纯享" : "控制面板"),
+    "当前视图  " + panelMode,
     "字幕  " + (captionCardsEnabled ? "已开启" : "未开启"),
-    "触控菜单  " + (touchMenuEnabled ? "已开启" : "未开启")];
+    "触控菜单  " + (menuEnabled ? "已开启" : "未开启")];
+  if (view.session) playback.push("角色  " + view.session.catalog.name);
   if (view.session && !view.session.limited) {
     const { enabled, groups } = readPerformances(view.session.catalog.id);
     playback.push("可用内容  " + Object.keys(names).map(kind => names[kind] + " " + items(kind).length).join(" · "),
@@ -1390,24 +1587,16 @@ $("#open-diagnostics").onclick = () => {
   } else if (view.session) {
     playback.push("模型模式  " + (view.viewer ? "第三方互动模型" : "基础预览"));
   }
-  const scene = window.sceneLayers;
   const layers = scene?.layers || [];
-  const materials = ["当前素材预览", "图层  " + layers.length,
+  const materials = ["应用内素材与预览", "图层  " + layers.length,
     "素材  " + layers.filter(layer => layer.media).length + " · 特效  " + layers.filter(layer => layer.kind === "effect").length,
     "可见素材  " + (scene?.mediaReady() ? "就绪" : "未就绪"),
     "默认背景配色  " + $("#theme-current").textContent,
-    "背景微动  " + (!native.hasWallpaperTilt() ? "设备不支持" : native.wallpaperTiltEnabled() ? "已开启" : "未开启")];
+    "触控边框  " + (sceneTouchToggle.checked ? "已开启" : "未开启"),
+    "背景微动  " + (!native.hasWallpaperTilt() ? "设备不支持" : native.wallpaperTiltEnabled() ? "已开启" : "未开启"),
+    "视线跟随  " + (native.wallpaperGazeEnabled() ? "已开启" : "未开启")];
   sections.splice(-1, 0, playback.join("\n"), materials.join("\n"));
-  report.replaceChildren(...sections.map(content => {
-    const firstLine = content.indexOf("\n");
-    const section = document.createElement("section");
-    const title = document.createElement("h3");
-    title.textContent = content.slice(0, firstLine);
-    const body = document.createElement("p");
-    body.textContent = content.slice(firstLine + 1);
-    section.append(title, body);
-    return section;
-  }));
+  report.replaceChildren(...sections.filter(Boolean).map(renderDiagnosticSection));
   diagnostics.showModal();
   report.scrollTop = 0;
   syncAppModalVisibility();
@@ -1474,7 +1663,7 @@ $("#mode-home").onchange = () => {
 };
 $("#grant-usage").onclick = () => native.setHomeOnly(true);
 $("#pure-preview-toggle").onchange = (event) => {
-  setControlsCollapsed(event.target.checked);
+  setControlsCollapsed(event.target.checked, true);
   settings.close();
 };
 $("#favorite-interactions").onchange = (event) => native.setInteractionFavoritesOnly(event.target.checked);
@@ -1499,7 +1688,7 @@ function openPreviewMenu(press) {
 avatarCanvas.addEventListener("pointerdown", (event) => {
   endPreviewPress();
   const root = document.documentElement;
-  if (event.pointerType !== "touch" || !event.isPrimary || !root.classList.contains("immersive-preview") ||
+  if (viewingSavedWallpaper() || event.pointerType !== "touch" || !event.isPrimary || !root.classList.contains("immersive-preview") ||
       (root.classList.contains("scene-edit") && !root.classList.contains("scene-preview"))) return;
   const press = { id: event.pointerId, x: event.clientX, y: event.clientY, started: event.timeStamp, opened: false };
   // Android can suppress click after a long touch, so open the menu while it is held.
@@ -1616,9 +1805,9 @@ previewStage.addEventListener("click", (event) => {
 $("#toolbar").addEventListener("pointerdown", () => revealPreviewControls("top"));
 $(".title-row").addEventListener("pointerdown", () => revealPreviewControls("bottom"));
 $("#filter").oninput = renderItems;
-$("#favorites").onclick = () => { showFavorites = !showFavorites; setTab(view.tab); };
+$("#favorites").onclick = () => { showFavorites = !showFavorites; setTab(view.tab, true); };
 $("#loop").onclick = () => send("loop", Number(!loops.has(view.tab)), view.tab);
-document.querySelectorAll("[data-tab]").forEach((node) => { node.onclick = () => setTab(node.dataset.tab); });
+document.querySelectorAll("[data-tab]").forEach((node) => { node.onclick = () => setTab(node.dataset.tab, view.tab !== node.dataset.tab); });
 document.querySelectorAll("[data-loop]").forEach((node) => {
   node.onclick = () => send("loop", Number(!loops.has(node.dataset.loop)), node.dataset.loop);
 });
@@ -1673,6 +1862,14 @@ window.wallpaperTap = (x, y) => {
   if (target?.closest("#pet-menu, #pet-menu-button")) target.closest("button")?.click();
   else if (target?.closest("#canvas")) avatarClick({clientX, clientY});
 };
+window.reloadAppliedWallpaper = () => {
+  window.refreshAppTheme?.();
+  window.setCaptionCardsEnabled(native.captionCardsEnabled());
+  window.setTouchMenuEnabled(native.touchMenuEnabled(), false);
+  window.setTouchMenuEnabled(native.thirdPartyMenuEnabled(), true);
+  window.sceneLayers?.reloadDesktopScene();
+  refreshModel().catch(error => reportError(error.message));
+};
 window.wallpaperGaze = (x, y) => {
   const model = view.model;
   const internal = model?.internalModel;
@@ -1689,4 +1886,10 @@ window.wallpaperGaze = (x, y) => {
 window.addEventListener("scene-editor-change", () => {
   showPetMenu(false);
   updateControlsVisibility();
+  updateSceneTouchFrames();
+  updateLoopOwner();
 });
+sceneTouchToggle.onchange = () => {
+  updateSceneTouchFrames();
+  if (sceneTouchToggle.checked && !sceneTouchBoxes().length) showAppNotice("当前模型没有可显示的触控框。");
+};

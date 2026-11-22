@@ -48,22 +48,24 @@
       ...layer, rotation: Number.isFinite(layer.rotation) ? wrapRotation(layer.rotation) : 0,
     }))];
   }
-  let layers;
+  let layers, draftSettings = null, editorDraft, savedInEditor;
+  let returningFromPreset = false;
   try {
-    layers = normalize(JSON.parse(wallpaper ? native.desktopSetting(key) : localStorage.getItem(key)));
+    const saved = JSON.parse(wallpaper ? native.desktopSetting(key) : localStorage.getItem(key));
+    layers = normalize(Array.isArray(saved) ? saved : saved?.scene);
   } catch { layers = defaults(); }
   let selected = "character", visible = true, engine;
-  let publishTimer, publishing = Promise.resolve();
   const nodes = new Map(), urls = new Map();
   const effects = new Map();
   const identifier = () => Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
   const host = $("#scene-layers");
   const tiltToggle = $("#scene-tilt");
+  const gazeToggle = $("#scene-gaze");
   function updateTiltPreview() {
     if (wallpaper) return;
     const classes = document.documentElement.classList;
     native.setWallpaperTiltPreview(!document.hidden && !!view.model &&
-      (classes.contains("scene-preview") || (classes.contains("immersive-preview") && !classes.contains("scene-edit"))));
+      (classes.contains("scene-preview") || (classes.contains("immersive-preview") && !classes.contains("scene-edit"))), tiltToggle.checked);
   }
   function shiftBackground(x, y) {
     host.style.setProperty("--wallpaper-shift-x", (x * 2).toFixed(3) + "%");
@@ -100,7 +102,8 @@
   }
   function releaseUnusedMedia(ids) {
     for (const id of ids) {
-      if (!id || layers.some(layer => layer.media === id) || window.savedWallpaperUsesMedia?.(id)) continue;
+      if (!id || layers.some(layer => layer.media === id) || editorDraft?.layers.some(layer => layer.media === id)
+          || window.savedWallpaperUsesMedia?.(id)) continue;
       removeMedia(id).catch(console.error);
     }
   }
@@ -109,14 +112,23 @@
       await media(layer.media) instanceof Blob ? null : layer.name));
     return files.filter(Boolean);
   }
-  function restore(scene) {
+  function openSavedConfiguration(scene, settings, preset) {
     const previous = layers;
+    const initial = settings ? null : captureConfiguration();
+    const options = settings || initial.settings;
+    editorDraft ??= {layers, selected, returnToEditor: !$("#scene-editor").hidden};
+    editorDraft.preset = preset ? {id: preset.id, snapshot: preset.snapshot || {...initial, scene: normalize(scene)}} : null;
+    savedInEditor = undefined;
     layers = normalize(scene);
-    if (!save()) { layers = previous; throw new Error("无法保存当前壁纸配置。"); }
+    draftSettings = {...options};
+    syncConfiguration();
     selected = "character";
     releaseUnusedMedia(previous.map(layer => layer.media));
-    render();
-    drawStack();
+    document.documentElement.classList.add("scene-saved-config");
+    stage.inert = true;
+    cancelPreviewTouch();
+    openEditor();
+    setScenePreview(true);
   }
   function message(text = "") {
     $("#scene-message").textContent = text;
@@ -127,11 +139,10 @@
     message(text);
   }
   function save() {
+    if (editorDraft) return true;
     try { localStorage.setItem(key, JSON.stringify(layers)); }
     catch { sceneFailure("场景保存失败，请检查可用存储空间。"); return false; }
     window.dispatchEvent(new Event("wallpaper-scene-saved"));
-    clearTimeout(publishTimer);
-    publishTimer = setTimeout(() => publishScene().catch(console.error), 150);
     return true;
   }
 
@@ -154,19 +165,30 @@
     }
   }
 
-  function publishScene() {
-    clearTimeout(publishTimer);
-    publishing = publishing.catch(() => {}).then(async () => {
-      const scene = layers;
-      const encoded = JSON.stringify(scene);
-      if (native.desktopSetting(key) === encoded) return;
-      for (const layer of scene) if (layer.media) await copyMedia(layer.media);
-      if (encoded === JSON.stringify(layers) && !native.setDesktopSetting(key, encoded)) throw new Error("壁纸场景保存失败，请检查可用空间。");
-    }).catch(error => {
+  function captureConfiguration() {
+    if (!view.model || !view.costume || !$("#loading").hidden) throw new Error("请等待模型加载完成。");
+    const config = native.captureWallpaperConfig(view.session.version, view.costume.id, view.viewerOutfit || "", JSON.stringify(layers),
+      draftSettings ? JSON.stringify(draftSettings) : "");
+    if (!config) throw new Error("无法保存壁纸配置，请检查模型和可用空间。");
+    return JSON.parse(config);
+  }
+
+  async function cacheConfigurationMedia(config) {
+    for (const layer of config.scene) if (layer.media) await copyMedia(layer.media);
+  }
+
+  async function prepareWallpaper(config) {
+    try {
+      const saved = savedInEditor && JSON.stringify(savedInEditor.snapshot) === JSON.stringify(config)
+        ? savedInEditor : editorDraft?.preset;
+      await cacheConfigurationMedia(config);
+      if (saved) await cacheConfigurationMedia(saved.snapshot);
+      const preset = saved ? JSON.stringify({...saved.snapshot, presetId: saved.id}) : "";
+      if (!native.prepareWallpaper(JSON.stringify(config), preset)) throw new Error("无法准备壁纸配置，请重试。");
+    } catch (error) {
       native.reportRuntimeFailure?.("scene-publish");
       throw error;
-    });
-    return publishing;
+    }
   }
   function applyNode(layer, node, index, panelPreview = false) {
     node.style.zIndex = index + 1;
@@ -273,7 +295,8 @@
       const effect = await particles.load({ id: node.id, element: node, options: particleOptions(layer.effect) });
       if (nodes.get(layer.id) !== node) { effect?.destroy(); return; }
       effects.set(layer.id, effect);
-      syncEffect(layers.find(item => item.id === layer.id));
+      const current = layers.find(item => item.id === layer.id);
+      if (current) syncEffect(current);
     } catch (error) {
       if (nodes.get(layer.id) !== node) return;
       console.error("Particle layer failed", error);
@@ -395,12 +418,30 @@
     editSelected();
   }
   function update() { save(); render(); drawStack(); }
+  function syncConfiguration() {
+    tiltToggle.disabled = !native.hasWallpaperTilt();
+    tiltToggle.checked = !tiltToggle.disabled && (draftSettings ? draftSettings["wallpaper-tilt"] === "true" : native.wallpaperTiltEnabled());
+    gazeToggle.checked = draftSettings ? draftSettings["wallpaper-gaze"] !== "false" : native.wallpaperGazeEnabled();
+  }
+  function changeConfiguration(toggle, saveDefault, failure) {
+    if (editorDraft) {
+      syncConfiguration();
+      return;
+    }
+    if (!saveDefault(toggle.checked)) {
+      syncConfiguration();
+      sceneFailure(failure);
+    }
+    updateTiltPreview();
+  }
   function openEditor() {
     if (!view.model) return;
     settings.close();
     document.documentElement.classList.add("scene-edit");
     $("#scene-editor").hidden = false;
+    window.refreshAppTheme?.();
     window.dispatchEvent(new Event("scene-editor-change"));
+    render();
     drawStack();
   }
   $("#edit-scene").onclick = openEditor;
@@ -423,38 +464,126 @@
       catch { /* Keep the current value for this session. */ }
     };
     updatePanelOpacity();
-    tiltToggle.disabled = !native.hasWallpaperTilt();
-    tiltToggle.checked = !tiltToggle.disabled && native.wallpaperTiltEnabled();
-    tiltToggle.onchange = () => {
-      if (!native.setWallpaperTiltEnabled(tiltToggle.checked)) {
-        tiltToggle.checked = native.wallpaperTiltEnabled();
-        sceneFailure("无法保存背景微动设置。");
-      }
-    };
+    syncConfiguration();
+    tiltToggle.onchange = () => changeConfiguration(tiltToggle, enabled => native.setWallpaperTiltEnabled(enabled), "无法保存背景微动设置。");
+    gazeToggle.onchange = () => changeConfiguration(gazeToggle, enabled => native.setWallpaperGazeEnabled(enabled), "无法保存视线跟随设置。");
   }
-  $("#scene-back").onclick = () => {
+  async function closeEditor(keepEditor = false, animate = false) {
+    if (returningFromPreset) return;
+    const root = document.documentElement;
+    const draft = editorDraft;
+    const present = (update) => animate ? transitionPanel(update, waitForSceneFrame) : update();
+    const finish = () => {
+      closeEditorView(root, keepEditor);
+      if (animate && draft && $("#scene-editor").hidden) $("#scene-open-presets").click();
+    };
+    if (wallpaperEditorPreset) {
+      returningFromPreset = true;
+      root.classList.add("scene-returning");
+      showPetMenu(false);
+      wallpaperEditorPreset = undefined;
+      let shown = false;
+      const swap = (showModel) => present(() => {
+        if (showModel() === false) return;
+        finish();
+        shown = true;
+      });
+      try {
+        if (!await refreshModel(swap) && !shown) await swap(clearPlayer);
+      } finally {
+        returningFromPreset = false;
+        root.classList.remove("scene-returning");
+      }
+    } else {
+      await present(finish);
+    }
+  }
+  function closeEditorView(root, keepEditor) {
+    const showEditor = keepEditor && Boolean(view.model);
     $("#scene-choices").hidden = true;
-    document.documentElement.classList.remove("scene-edit", "scene-preview");
-    $("#scene-editor").hidden = true;
+    savedInEditor = undefined;
+    root.classList.remove("scene-preview", "scene-saved-config", "scene-returning");
+    root.classList.toggle("scene-edit", showEditor);
+    $("#scene-editor").hidden = !showEditor;
+    stage.inert = false;
     $("#scene-preview").setAttribute("aria-pressed", "false");
     $("#scene-preview").textContent = "预览";
+    if (editorDraft) {
+      const previous = layers;
+      ({layers, selected} = editorDraft);
+      editorDraft = undefined;
+      draftSettings = null;
+      releaseUnusedMedia(previous.map(layer => layer.media));
+      syncConfiguration();
+    }
+    window.refreshAppTheme?.();
     window.dispatchEvent(new Event("scene-editor-change"));
+    render();
+    if (showEditor) drawStack();
+    view.app?.syncCanvas();
+  }
+  $("#scene-back").onclick = async () => {
+    if (returningFromPreset || wallpaperChanging) return;
+    await closeEditor(editorDraft?.returnToEditor, true);
   };
-  $("#scene-preview").onclick = () => {
-    const on = document.documentElement.classList.toggle("scene-preview");
+  function setScenePreview(on) {
+    document.documentElement.classList.toggle("scene-preview", on);
     $("#scene-preview").textContent = on ? "编辑" : "预览";
     $("#scene-preview").setAttribute("aria-pressed", String(on));
     if (!on) showPetMenu(false);
     updateTiltPreview();
+  }
+  $("#scene-preview").onclick = () => {
+    if (!editorDraft) setScenePreview(!document.documentElement.classList.contains("scene-preview"));
   };
-  for (const name of ["opacity", "scale", "x", "y", "rotation"]) {
+  for (const name of ["opacity", "scale", "x", "y"]) {
     $("#scene-" + name).oninput = (event) => {
-      if (isBase(current())) return;
-      current()[name] = Number(event.target.value) / (name === "rotation" ? 1 : 100);
+      if (editorDraft || isBase(current())) return;
+      current()[name] = event.target.valueAsNumber / 100;
       render(); editSelected();
     };
     $("#scene-" + name).onchange = save;
   }
+
+  function sliderRotation(angle, drag, now) {
+    const alignment = Math.floor(angle / 90 + .5) * 90;
+    const distance = Math.abs(angle - alignment);
+    const crossed = (drag.previous < alignment && angle > alignment) || (drag.previous > alignment && angle < alignment);
+    drag.previous = angle;
+    if (drag.alignment !== undefined && Math.abs(angle - drag.alignment) > 12) drag.alignment = undefined;
+    if (drag.alignment === undefined && (distance <= 4 || (crossed && distance <= 12))) {
+      drag.alignment = alignment;
+      drag.holdUntil = now + 300;
+    }
+    return drag.alignment !== undefined && now < drag.holdUntil ? drag.alignment : angle;
+  }
+
+  const rotationSlider = $("#scene-rotation");
+  let rotationDrag;
+  rotationSlider.addEventListener("pointerdown", event => {
+    if (event.isPrimary && event.button === 0) rotationDrag = {id: event.pointerId, previous: rotationSlider.valueAsNumber};
+  });
+  function endRotationDrag(event) {
+    if (rotationDrag?.id === event.pointerId) rotationDrag = undefined;
+  }
+  window.addEventListener("pointerup", endRotationDrag);
+  window.addEventListener("pointercancel", endRotationDrag);
+  rotationSlider.addEventListener("lostpointercapture", endRotationDrag);
+  rotationSlider.addEventListener("keydown", () => { rotationDrag = undefined; });
+  rotationSlider.oninput = () => {
+    const layer = current();
+    if (editorDraft || isBase(layer)) return;
+    const angle = rotationSlider.valueAsNumber;
+    const value = rotationDrag ? sliderRotation(angle, rotationDrag, performance.now()) : angle;
+    if (layer.rotation === value) {
+      rotationSlider.value = value;
+      return;
+    }
+    layer.rotation = value;
+    render(); editSelected();
+  };
+  rotationSlider.onchange = save;
+
   function addEffect(effect, name) {
     if (layers.length >= 12) return message("最多可放置 12 个图层。");
     if (layers.filter(layer => layer.kind === "effect").length >= 3) return message("最多同时使用 3 层特效，减少发热与耗电。");
@@ -477,7 +606,7 @@
       content.append(choice);
     }
     grid.replaceChildren(content);
-    choices.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    choices.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   };
   // Keep the framebuffer size steady during gestures.
   const stage = $("#stage"), fingers = new Map();
@@ -536,7 +665,7 @@
   stage.addEventListener("pointerdown", event => {
     const root = document.documentElement;
     const editing = root.classList.contains("scene-edit") && !root.classList.contains("scene-preview");
-    if (wallpaper || !root.classList.contains("immersive-preview") || !view.model || !$("#loading").hidden
+    if (wallpaper || editorDraft || !root.classList.contains("immersive-preview") || !view.model || !$("#loading").hidden
         || (!fingers.size && ((editing && isBase(current())) || event.target.closest("#caption, #pet-menu, button")))) return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
     if (!fingers.size) {
@@ -654,13 +783,13 @@
     }
   }
   async function changeWallpaper(exit, fromEditor = false) {
-    if (wallpaper || wallpaperChanging || busy || (!exit && !view.model)) return;
+    if (wallpaper || wallpaperChanging || busy || returningFromPreset || (!exit && !view.model)) return;
     if (!exit && !save()) return showAppNotice("壁纸场景保存失败，请检查可用存储空间。");
     wallpaperChanging = true;
     updateWallpaperButton();
     try {
-      if (!exit) await publishScene();
-      if (fromEditor) $("#scene-back").click();
+      if (!exit) await prepareWallpaper(editorDraft?.preset?.snapshot ?? captureConfiguration());
+      if (fromEditor) await closeEditor();
       native.changeWallpaper(exit);
     } catch (error) {
       wallpaperChanging = false;
@@ -675,9 +804,10 @@
   $("#scene-apply").onclick = () => changeWallpaper(false, true);
   window.runWallpaperTileAction = exit => changeWallpaper(exit, !$("#scene-editor").hidden);
   window.addEventListener("storage", event => {
-    if (event.key !== key || !event.newValue) return;
+    if (wallpaper || editorDraft || event.key !== key || !event.newValue) return;
     try {
-      layers = normalize(JSON.parse(event.newValue));
+      const draft = JSON.parse(event.newValue);
+      layers = normalize(Array.isArray(draft) ? draft : draft?.scene);
       render();
       if (!$("#scene-editor").hidden) drawStack();
       scheduleWallpaperFrame();
@@ -687,16 +817,37 @@
     setVisible(!document.hidden && (wallpaper ? wallpaperVisible : panelPlaybackActive));
     updateTiltPreview();
   });
-  window.sceneLayers = {
-    render, setVisible, get layers() { return JSON.parse(JSON.stringify(layers)); }, open: openEditor,
-    ignoreGestureClick: (event) => suppressClick && event.detail > 0,
-    setTiltActive, shiftBackground, updateTiltPreview,
-    mediaReady: () => layers.every(layer => {
+  function mediaReady() {
+    return layers.every(layer => {
       if (!layer.visible || layer.opacity <= 0 || !layer.media) return true;
       const node = nodes.get(layer.id);
       return layer.kind === "video" ? node?.readyState >= 2 : node?.complete && node.naturalWidth > 0;
-    }),
-    media, removeMedia, releaseUnusedMedia, missingMedia, restore,
+    });
+  }
+  function waitForSceneFrame() {
+    view.app?.syncCanvas();
+    view.app?.renderer.render(view.app.stage);
+    if (mediaReady() || !view.model) return;
+    return new Promise(resolve => {
+      const deadline = performance.now() + 650;
+      const check = () => {
+        if (mediaReady() || document.hidden || performance.now() >= deadline) resolve();
+        else setTimeout(check, 24);
+      };
+      check();
+    });
+  }
+  window.sceneLayers = {
+    render, setVisible, get layers() { return JSON.parse(JSON.stringify(layers)); }, open: () => transitionPanel(openEditor, waitForSceneFrame),
+    get savedPreviewOpen() { return Boolean(editorDraft); },
+    get wallpaperTheme() { return draftSettings && document.documentElement.classList.contains("scene-edit") ? draftSettings.theme ?? null : undefined; },
+    ignoreGestureClick: (event) => suppressClick && event.detail > 0,
+    setTiltActive, shiftBackground, updateTiltPreview,
+    mediaReady, waitForSceneFrame,
+    media, removeMedia, releaseUnusedMedia, missingMedia, openSavedConfiguration, captureConfiguration, cacheConfigurationMedia,
+    noteSavedConfiguration(item) {
+      if (document.documentElement.classList.contains("scene-edit")) savedInEditor = item;
+    },
     reloadDesktopScene() {
       if (!wallpaper) return;
       layers = normalize(JSON.parse(native.desktopSetting(key)));
@@ -705,5 +856,4 @@
     },
   };
   render();
-  if (!wallpaper) publishScene().catch(console.error);
 })();

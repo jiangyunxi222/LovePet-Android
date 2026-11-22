@@ -2,7 +2,7 @@
 
 适用于 Android 11 及以上版本，使用系统提供的 Android System WebView。
 
-[下载 LovePet 1.0.0 正式 APK](https://github.com/jiangyunxi222/LovePet-Android/releases/tag/LovePet_Android_V1.0.0) · [LovePet Windows](https://github.com/jiangyunxi222/LovePet-Windows)
+[下载 LovePet 1.0.1 正式 APK](https://github.com/jiangyunxi222/LovePet-Android/releases/tag/LovePet_Android_V1.0.1) · [LovePet Windows](https://github.com/jiangyunxi222/LovePet-Windows)
 
 手机角色库收录 [Garupa 的 47 个单角色包](https://github.com/jiangyunxi222/GarupaLive2D-Mobile) 和 [OurNotes 的 44 个单角色包](https://github.com/jiangyunxi222/OurNotesLive2D-Mobile)。制作或转换可使用 [LovePetTool](https://github.com/jiangyunxi222/LovePetTool)。
 
@@ -44,6 +44,6 @@ adb install -r dist/BandoriLovePet-debug.apk
 pwsh -File ./build.ps1 -ReleaseKeystore 'D:\signing\release.p12' -SigningLineage 'D:\signing\lineage.bin'
 ```
 
-正式包输出到 `dist/BandoriLovePet.apk`。LovePet 的显示版本为 1.0.0，Android 内部版本号为 13。应用 ID 为 `io.bandorilove.lovepet`，签名轮换证明用于已有安装的覆盖升级。
+正式包输出到 `dist/BandoriLovePet.apk`。LovePet 的显示版本为 1.0.1，Android 内部版本号为 14。应用 ID 为 `io.bandorilove.lovepet`，签名轮换证明用于已有安装的覆盖升级。
 
 tsParticles 使用 MIT 许可证，完整声明位于 `vendor/tsparticles-LICENSE.txt`，依赖来源与校验值位于 `vendor/tsparticles-sources.json`，均随 APK 一并打包。其他依赖见 [第三方声明](THIRD_PARTY_NOTICES.txt)。

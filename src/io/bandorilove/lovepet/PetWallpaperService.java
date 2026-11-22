@@ -24,42 +24,20 @@ import android.widget.FrameLayout;
 
 import java.util.HashSet;
 import java.util.Set;
-import org.json.JSONObject;
 
 public final class PetWallpaperService extends WallpaperService {
+    static final String GAZE_SETTING = "wallpaper-gaze";
     private static final long RENDERER_RETRY_DELAY_MS = 500;
     private static final long RENDERER_RETRY_INTERVAL_MS = 30_000;
     private static final long SURFACE_GRACE_MS = 5_000;
     private static final long VISIBILITY_GRACE_MS = 450;
-    private static final long GAZE_HOLD_MS = 300;
+    private static final long TAP_MAX_DURATION_MS = 300;
     private static final Set<PetEngine> engines = new HashSet<>();
 
-    static void refresh() {
+    static void refreshAppliedWallpaper() {
         for (PetEngine engine : engines) {
-            if (engine.player != null) engine.player.refresh();
+            if (!engine.isPreview() && engine.player != null) engine.refreshWallpaper();
         }
-    }
-
-    static void refreshScene() {
-        for (PetEngine engine : engines) if (engine.player != null) engine.player.refreshWallpaperScene();
-    }
-
-    static void refreshTilt() {
-        for (PetEngine engine : engines) if (engine.player != null) engine.player.updateWallpaperTilt();
-    }
-
-    static void updateCaptions(boolean enabled) {
-        for (PetEngine engine : engines) {
-            if (engine.player != null) engine.player.updateCaptionCards(enabled);
-        }
-    }
-
-    static void updateTheme() {
-        for (PetEngine engine : engines) if (engine.player != null) engine.player.updateTheme();
-    }
-
-    static void updateTouchMenu(boolean enabled, boolean thirdParty) {
-        for (PetEngine engine : engines) if (engine.player != null) engine.player.updateTouchMenu(enabled, thirdParty);
     }
 
     static void updatePetStatus() {
@@ -77,12 +55,6 @@ public final class PetWallpaperService extends WallpaperService {
         }
     }
 
-    static void receive(JSONObject command, boolean sound) {
-        for (PetEngine engine : engines) {
-            if (engine.player != null) engine.player.receive(command, sound && engine.visible);
-        }
-    }
-
     @Override public Engine onCreateEngine() { return new PetEngine(); }
 
     @Override public void onCreate() {
@@ -95,11 +67,8 @@ public final class PetWallpaperService extends WallpaperService {
         private final Runnable retryRenderer = this::startRenderer;
         private final Runnable releaseDetachedRenderer = this::release;
         private final Runnable pauseHiddenRenderer = () -> setRendererVisible(false);
-        private final Runnable startGaze = () -> {
-            followingGaze = true;
-            updateGaze();
-        };
         private final Runnable updateGazeFrame = this::updateGaze;
+        private final int tapSlop = ViewConfiguration.get(PetWallpaperService.this).getScaledTouchSlop();
         private VirtualDisplay display;
         private Presentation presentation;
         private PetWeb player;
@@ -111,7 +80,8 @@ public final class PetWallpaperService extends WallpaperService {
         private boolean visible;
         private boolean rendererVisible;
         private boolean destroyed;
-        private boolean followingGaze;
+        private boolean gazeEnabled;
+        private boolean tapInterrupted;
         private int gazePointer = -1;
         private float downX, downY, gazeX, gazeY;
         private long suppressTapUntil;
@@ -200,6 +170,7 @@ public final class PetWallpaperService extends WallpaperService {
                 renderer.onWallpaperFrameReady(() -> showLiveFrame(renderer));
                 content.addView(renderer.view(), 0, new FrameLayout.LayoutParams(-1, -1));
                 renderer.loadWallpaper(isPreview());
+                gazeEnabled = renderer.wallpaperGazeEnabled();
                 rendererVisible = visible && surfaceWidth > 0;
                 renderer.wallpaperVisible(rendererVisible);
                 renderer.setWallpaperTiltVisible(rendererVisible);
@@ -216,7 +187,7 @@ public final class PetWallpaperService extends WallpaperService {
             this.visible = visible;
             main.removeCallbacks(pauseHiddenRenderer);
             if (!visible) {
-                endGaze();
+                endGaze(true);
                 if (player != null) player.setWallpaperTiltVisible(false);
                 main.postDelayed(pauseHiddenRenderer, VISIBILITY_GRACE_MS);
                 main.removeCallbacks(retryRenderer);
@@ -224,6 +195,7 @@ public final class PetWallpaperService extends WallpaperService {
             } else if (player == null) {
                 startRenderer();
             } else {
+                if (!isPreview()) refreshWallpaper();
                 setRendererVisible(surfaceWidth > 0);
                 player.setWallpaperTiltVisible(surfaceWidth > 0);
             }
@@ -271,35 +243,34 @@ public final class PetWallpaperService extends WallpaperService {
             }
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    endGaze();
+                    endGaze(false);
                     suppressTapUntil = 0;
+                    tapInterrupted = false;
                     gazePointer = event.getPointerId(0);
                     downX = gazeX = event.getX();
                     downY = gazeY = event.getY();
-                    main.postDelayed(startGaze, GAZE_HOLD_MS);
+                    updateGaze();
                     break;
                 case MotionEvent.ACTION_MOVE:
                     int index = event.findPointerIndex(gazePointer);
                     if (index < 0) return;
                     gazeX = event.getX(index);
                     gazeY = event.getY(index);
-                    if (!followingGaze && event.getEventTime() - event.getDownTime() >= GAZE_HOLD_MS) {
-                        main.removeCallbacks(startGaze);
-                        startGaze.run();
-                    } else if (followingGaze) {
-                        if (!main.hasCallbacks(updateGazeFrame)) main.postDelayed(updateGazeFrame, 16);
-                    } else {
-                        int slop = ViewConfiguration.get(PetWallpaperService.this).getScaledTouchSlop();
-                        if (Math.hypot(gazeX - downX, gazeY - downY) > slop) endGaze();
-                    }
+                    float dx = gazeX - downX, dy = gazeY - downY;
+                    tapInterrupted |= dx * dx + dy * dy > tapSlop * tapSlop;
+                    if (gazeEnabled && !main.hasCallbacks(updateGazeFrame)) main.postDelayed(updateGazeFrame, 16);
                     break;
                 case MotionEvent.ACTION_UP:
-                    if (gazePointer >= 0 && event.getEventTime() - event.getDownTime() >= GAZE_HOLD_MS) suppressNextTap();
-                    endGaze();
+                    if (tapInterrupted || (gazePointer >= 0
+                            && event.getEventTime() - event.getDownTime() >= TAP_MAX_DURATION_MS)) suppressNextTap();
+                    endGaze(false);
+                    break;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    tapInterrupted = true;
+                    endGaze(true);
                     break;
                 case MotionEvent.ACTION_CANCEL:
-                case MotionEvent.ACTION_POINTER_DOWN:
-                    endGaze();
+                    endGaze(true);
                     break;
                 default:
                     break;
@@ -307,17 +278,26 @@ public final class PetWallpaperService extends WallpaperService {
         }
 
         private void updateGaze() {
-            if (followingGaze && player != null) player.wallpaperGaze(gazeX, gazeY);
+            if (gazeEnabled && gazePointer >= 0 && player != null) player.wallpaperGaze(gazeX, gazeY);
         }
 
-        private void endGaze() {
-            main.removeCallbacks(startGaze);
+        private void refreshWallpaper() {
+            player.refreshAppliedWallpaper();
+            boolean enabled = player.wallpaperGazeEnabled();
+            if (enabled == gazeEnabled) return;
+            gazeEnabled = enabled;
+            if (!enabled) {
+                main.removeCallbacks(updateGazeFrame);
+                if (gazePointer >= 0 && player != null) player.resetWallpaperGaze();
+            }
+        }
+
+        private void endGaze(boolean suppressTap) {
             main.removeCallbacks(updateGazeFrame);
+            if (gazePointer < 0) return;
             gazePointer = -1;
-            if (!followingGaze) return;
-            followingGaze = false;
-            suppressNextTap();
-            if (player != null) player.resetWallpaperGaze();
+            if (suppressTap) suppressNextTap();
+            if (gazeEnabled && player != null) player.resetWallpaperGaze();
         }
 
         private void suppressNextTap() { suppressTapUntil = SystemClock.uptimeMillis() + 240; }
@@ -327,7 +307,7 @@ public final class PetWallpaperService extends WallpaperService {
                 PetWeb current = player;
                 // The launcher command and the mirrored touch arrive on separate channels.
                 main.postDelayed(() -> {
-                    if (player == current && visible && surfaceWidth > 0 && !followingGaze
+                    if (player == current && visible && surfaceWidth > 0 && gazePointer < 0
                             && SystemClock.uptimeMillis() >= suppressTapUntil) current.wallpaperTap(x, y);
                 }, 55);
             }
@@ -346,7 +326,7 @@ public final class PetWallpaperService extends WallpaperService {
         }
 
         private void clearSurfaceState() {
-            endGaze();
+            endGaze(true);
             main.removeCallbacks(retryRenderer);
             main.removeCallbacks(releaseDetachedRenderer);
             main.removeCallbacks(pauseHiddenRenderer);
@@ -357,7 +337,7 @@ public final class PetWallpaperService extends WallpaperService {
         }
 
         private void release() {
-            endGaze();
+            endGaze(true);
             main.removeCallbacks(pauseHiddenRenderer);
             rendererVisible = false;
             recoveryCover = null;

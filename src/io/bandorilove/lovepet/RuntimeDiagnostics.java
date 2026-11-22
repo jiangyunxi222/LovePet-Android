@@ -11,6 +11,8 @@ import android.provider.Settings;
 import android.text.format.DateFormat;
 import android.webkit.WebView;
 
+import org.json.JSONArray;
+
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 
@@ -43,6 +45,7 @@ final class RuntimeDiagnostics {
     static String report(MainActivity activity) {
         ActivityManager manager = activity.getSystemService(ActivityManager.class);
         boolean petRunning = DesktopRuntime.isPetRunning(activity);
+        boolean overlayAllowed = Settings.canDrawOverlays(activity);
         StringBuilder result = new StringBuilder("应用与设备");
         row(result, "应用", version(activity));
         row(result, "设备", Build.MANUFACTURER + " " + Build.MODEL + " · Android " + Build.VERSION.RELEASE + " / API " + Build.VERSION.SDK_INT);
@@ -51,7 +54,7 @@ final class RuntimeDiagnostics {
         row(result, "可用存储", activity.getFilesDir().getUsableSpace() / (1024 * 1024) + " MB");
 
         result.append("\n\n权限配置");
-        row(result, "悬浮窗", enabled(Settings.canDrawOverlays(activity)));
+        row(result, "悬浮窗", enabled(overlayAllowed));
         row(result, "使用情况访问", enabled(HomeVisibility.hasUsageAccess(activity)));
         switch (activity.wallpaperPermissionState()) {
             case "enabled": row(result, "动态壁纸服务", "已开启"); break;
@@ -71,22 +74,49 @@ final class RuntimeDiagnostics {
 
         result.append("\n\n桌宠");
         row(result, "服务", petRunning ? "运行中" : "未运行");
+        row(result, "桌宠可见", petRunning && DesktopRuntime.petVisible() ? "已显示" : "未显示");
         row(result, "显示范围", PetService.homeOnly(activity) ? "仅在桌面" : "在应用上层");
         last(result, activity, "最近服务事件", Area.PET_SERVICE);
         last(result, activity, "最近桌宠渲染", Area.PET_RENDER);
 
-        result.append("\n\n壁纸与素材特效");
-        row(result, "主屏幕动态壁纸", WallpaperRecovery.isApplied(activity, WallpaperManager.FLAG_SYSTEM) ? "已应用" : "未应用");
-        row(result, "锁屏动态壁纸", Build.VERSION.SDK_INT < 34 ? "系统无法单独查询"
-                : WallpaperRecovery.isApplied(activity, WallpaperManager.FLAG_LOCK) ? "已应用" : "未应用");
-        last(result, activity, "壁纸应用与退出", Area.WALLPAPER_CHANGE);
-        last(result, activity, "最近壁纸渲染", Area.WALLPAPER_RENDER);
-        last(result, activity, "最近系统壁纸预览渲染", Area.WALLPAPER_PREVIEW);
-        last(result, activity, "最近素材特效异常", Area.SCENE_ERROR);
+        wallpaperStatus(result, activity, store);
+
+        result.append("\n\n控制中心快捷操作");
+        row(result, "桌宠快捷开关", petRunning ? "可关闭桌宠" : model == null ? "需先导入模型"
+                : !overlayAllowed ? "需开启悬浮窗权限" : "启动条件已满足");
+        WallpaperSnapshot latest = WallpaperSnapshot.latest(activity);
+        row(result, "壁纸快捷应用", latest == null ? "需在应用中保存壁纸配置"
+                : latest.available(activity, store) ? "可复用已保存配置" : "配置的模型或素材已失效");
+        row(result, "壁纸快捷退出", new WallpaperRecovery(activity).hasChosenPhoto()
+                ? "可恢复上次选择的图片" : "需在应用中选择恢复方式");
         last(result, activity, "最近控制中心操作", Area.QUICK_SETTINGS);
 
         appendExitHistory(result, manager, activity.getPackageName());
         return result.toString();
+    }
+
+    private static void wallpaperStatus(StringBuilder result, MainActivity activity, ModelStore store) {
+        boolean home = WallpaperRecovery.isApplied(activity, WallpaperManager.FLAG_SYSTEM);
+        boolean lock = Build.VERSION.SDK_INT >= 34 && WallpaperRecovery.isApplied(activity, WallpaperManager.FLAG_LOCK);
+        result.append("\n\n壁纸与素材特效");
+        row(result, "主屏幕动态壁纸", home ? "已应用" : "未应用");
+        row(result, "锁屏动态壁纸", Build.VERSION.SDK_INT < 34 ? "系统无法单独查询" : lock ? "已应用" : "未应用");
+        JSONArray presets = WallpaperSnapshot.presetIndex(activity).optJSONArray("ids");
+        row(result, "已保存配置", (presets == null ? 0 : presets.length()) + " 套");
+        if (WallpaperSnapshot.pending(activity) != null) row(result, "壁纸应用进度", "等待应用结果");
+        if (home || lock) {
+            WallpaperSnapshot applied = WallpaperSnapshot.applied(activity);
+            row(result, "已应用配置", applied == null ? "未找到独立配置记录"
+                    : applied.available(activity, store) ? "独立配置已锁定" : "独立配置的模型或素材已失效");
+            if (applied != null) {
+                row(result, "已应用背景微动", enabled("true".equals(applied.setting(WallpaperTilt.SETTING))));
+                row(result, "已应用视线跟随", enabled(!"false".equals(applied.setting(PetWallpaperService.GAZE_SETTING))));
+            }
+        }
+        last(result, activity, "壁纸应用与退出", Area.WALLPAPER_CHANGE);
+        last(result, activity, "最近壁纸渲染", Area.WALLPAPER_RENDER);
+        last(result, activity, "最近系统壁纸预览渲染", Area.WALLPAPER_PREVIEW);
+        last(result, activity, "最近素材特效异常", Area.SCENE_ERROR);
     }
 
     private static String version(Context context) {

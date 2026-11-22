@@ -50,33 +50,27 @@ final class DesktopRuntime {
             case "command":
                 try {
                     JSONObject command = new JSONObject(intent.getStringExtra("value"));
-                    if (DESKTOP) {
-                        PetService.receive(command, intent.getBooleanExtra("flag", false));
-                        PetWallpaperService.receive(command, false);
-                    } else MainActivity.receive(command, false);
+                    if (DESKTOP) PetService.receive(command, intent.getBooleanExtra("flag", false));
+                    else MainActivity.receive(command, false);
                 } catch (JSONException ignored) {}
                 break;
             case "model":
-                if (DESKTOP) { PetService.refresh(); PetWallpaperService.refresh(); }
+                if (DESKTOP) PetService.refresh();
                 break;
-            case "scene":
-                if (DESKTOP) PetWallpaperService.refreshScene();
+            case WallpaperSnapshot.APPLIED_KEY:
+                if (DESKTOP) PetWallpaperService.refreshAppliedWallpaper();
                 break;
             case "wallpaper-preview-visible":
                 if (!DESKTOP) MainActivity.wallpaperPreviewVisible();
-                break;
-            case WallpaperTilt.SETTING:
-                if (DESKTOP) PetWallpaperService.refreshTilt();
                 break;
             case "captions":
                 if (DESKTOP) {
                     boolean enabled = intent.getBooleanExtra("flag", true);
                     PetService.updateCaptions(enabled);
-                    PetWallpaperService.updateCaptions(enabled);
                 }
                 break;
             case "theme":
-                if (DESKTOP) { PetService.updateTheme(); PetWallpaperService.updateTheme(); }
+                if (DESKTOP) PetService.updateTheme();
                 break;
             case "touch-menu":
             case "third-party-menu":
@@ -84,7 +78,6 @@ final class DesktopRuntime {
                     boolean thirdParty = "third-party-menu".equals(type);
                     boolean enabled = intent.getBooleanExtra("flag", !thirdParty);
                     PetService.updateTouchMenu(enabled, thirdParty);
-                    PetWallpaperService.updateTouchMenu(enabled, thirdParty);
                 }
                 break;
             case "settings":
@@ -169,6 +162,8 @@ final class DesktopRuntime {
     private static File setting(Context context, String key) {
         return new File(new File(context.getFilesDir(), "desktop-settings"), key.replace(':', '.'));
     }
+
+    static void remove(Context context, String key) { setting(context, key).delete(); }
 
     static File media(Context context, String name) {
         return new File(new File(context.getFilesDir(), "desktop-media"), name);
